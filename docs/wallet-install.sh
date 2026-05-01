@@ -49,7 +49,7 @@ for arg in "$@"; do
     --force) force=1 ;;
     --stop)  stop=1 ;;
     -h|--help)
-      sed -n '2,17p' "$0" | sed 's/^#\s\{0,1\}//'
+      sed -n '2,17p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'
       exit 0
       ;;
     *) die "unknown argument: $arg  (try --help)" ;;
@@ -139,7 +139,7 @@ env_flags=""
 for var in TZEL_NETWORK TZEL_ROLLUP_RPC_URL TZEL_L1_RPC \
            TZEL_NETWORK_NAME TZEL_NETWORK_LABEL TZEL_TZKT_BASE_URL \
            TZEL_PROVING_SERVICE_URL; do
-  val=$(eval "echo \${${var}:-}")
+  eval "val=\${${var}:-}"
   if [ -n "$val" ]; then
     env_flags="$env_flags -e ${var}=${val}"
   fi
@@ -158,7 +158,7 @@ docker run -d \
 info "waiting for wallet to be ready"
 ok=0
 i=1
-while [ "$i" -le 30 ]; do
+while [ "$i" -le 60 ]; do
   if curl -fsS "http://127.0.0.1:${HOST_PORT}/healthz" >/dev/null 2>&1; then
     ok=1
     break
@@ -167,7 +167,8 @@ while [ "$i" -le 30 ]; do
   i=$((i+1))
 done
 if [ "$ok" -ne 1 ]; then
-  warn "wallet did not come up within 30 s. Check docker logs -f $CONTAINER"
+  warn "wallet did not come up within 60 s. Check: docker logs -f $CONTAINER"
+  warn "If a previous install left a broken container, re-run with --force to recreate it."
   exit 1
 fi
 

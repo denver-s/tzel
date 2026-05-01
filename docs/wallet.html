@@ -717,6 +717,9 @@
       .steps-grid { grid-template-columns: 1fr; }
       .install-cmd { font-size: 0.82rem; }
     }
+
+    code.ic { font-family: var(--mono); color: var(--blue-light); font-size: 0.9em; }
+    code.ic-plain { font-family: var(--mono); font-size: 0.88em; }
   </style>
 </head>
 <body>
@@ -755,9 +758,10 @@
             </div>
             <span class="install-label">terminal</span>
             <button class="copy-btn" onclick="
-              navigator.clipboard.writeText('curl -sSL https://tzel.tezos.com/wallet-install.sh | sh');
-              this.textContent='copied';
-              setTimeout(() => this.textContent='copy', 1800);
+              var btn = this;
+              navigator.clipboard.writeText('curl -sSL ' + location.origin + '/wallet-install.sh | sh')
+                .then(function() { btn.textContent='copied'; setTimeout(function() { btn.textContent='copy'; }, 1800); })
+                .catch(function() { btn.textContent='copy failed'; setTimeout(function() { btn.textContent='copy'; }, 2500); });
             ">copy</button>
           </div>
           <div class="install-cmd">
@@ -784,19 +788,19 @@
         <div class="step">
           <div class="step-num">Step 01</div>
           <h3>Run the install command</h3>
-          <p>The script checks for Docker, pulls the wallet image from the GitHub Container Registry, and starts the container on <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">127.0.0.1:8787</code>.</p>
+          <p>The script checks for Docker, pulls the wallet image from the GitHub Container Registry, and starts the container on <code class="ic">127.0.0.1:8787</code>.</p>
           <div class="step-connector"></div>
         </div>
         <div class="step">
           <div class="step-num">Step 02</div>
           <h3>Open the wallet UI</h3>
-          <p>Navigate to <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">http://127.0.0.1:8787</code> in your browser. The UI and API share the same origin, which is what makes Temple wallet pairing work.</p>
+          <p>Navigate to <code class="ic">http://127.0.0.1:8787</code> in your browser. The UI and API share the same origin, which is what makes Temple wallet pairing work.</p>
           <div class="step-connector"></div>
         </div>
         <div class="step">
           <div class="step-num">Step 03</div>
           <h3>Create or import a wallet</h3>
-          <p>Generate a new TzEL wallet or import an existing one. Your spending key, viewing key, and detection material are stored locally in <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">~/.tzel-wallet</code> &mdash; never sent anywhere.</p>
+          <p>Generate a new TzEL wallet or import an existing one. Your spending key, viewing key, and detection material are stored locally in <code class="ic">~/.tzel-wallet</code> &mdash; never sent anywhere.</p>
           <div class="step-connector"></div>
         </div>
         <div class="step">
@@ -814,7 +818,7 @@
         <div>
           <h3>Self-custodial.<br>Keys stay on your machine.</h3>
           <p>The wallet container mounts a single directory from your home folder. Everything that matters &mdash; your spending key, incoming and outgoing viewing keys, detection material, and the full wallet state &mdash; lives in that directory. The container reads and writes it; nothing else touches it.</p>
-          <p>Back up <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">~/.tzel-wallet</code> and you can recover your wallet on any machine. Lose it and there is no recovery path &mdash; there is no server that holds your keys.</p>
+          <p>Back up <code class="ic">~/.tzel-wallet</code> and you can recover your wallet on any machine. Lose it and there is no recovery path &mdash; there is no server that holds your keys.</p>
         </div>
         <div class="feature-visual">
           <span class="dim">~/.tzel-wallet/</span><br>
@@ -834,8 +838,7 @@
       <div class="feature">
         <div>
           <h3>One port.<br>Same origin for Temple pairing.</h3>
-          <p>The daemon serves both the wallet UI and its JSON API on port 8787. This single-origin design is what makes Temple wallet pairing work: the Beacon SDK uses PostMessage between page and extension, and that channel requires both to share an origin.</p>
-          <p>Earlier architectures put the UI on port 80 and the API on 8787. That split origin broke Temple pairing silently &mdash; the extension connected but transactions could not be authorized. The bundle image eliminates the split entirely.</p>
+          <p>The daemon serves both the wallet UI and its JSON API on port 8787. This single-origin design is what makes Temple wallet pairing work: the Beacon SDK uses PostMessage between page and extension, and that channel requires both to share an origin. The install script binds <code class="ic">127.0.0.1:8787</code> on the host, so the wallet is never reachable from other machines by default.</p>
         </div>
         <div class="feature-visual">
           <span class="dim">daemon on :8787</span><br>
@@ -898,7 +901,7 @@
       <div class="feature">
         <div>
           <h3>Manage the container.<br>Your data survives restarts.</h3>
-          <p>The install script supports three modes. The default run creates and starts the container. <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">--force</code> tears down an existing container and starts a fresh one (useful after an image update). <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.9em">--stop</code> removes the container without touching your wallet data.</p>
+          <p>The install script supports three modes. The default run creates and starts the container. <code class="ic">--force</code> tears down an existing container and starts a fresh one (useful after an image update). <code class="ic">--stop</code> removes the container without touching your wallet data.</p>
           <p>Because wallet data is in a bind-mounted directory on the host, stopping or recreating the container never affects your keys or transaction history. The container is stateless; your home directory is the state.</p>
         </div>
         <div class="feature-visual">
@@ -933,7 +936,7 @@
     <div class="warning-banner">
       <div class="warning-inner">
         <strong>Experimental software &mdash; Ushuaianet testnet only.</strong>
-        TzEL is research-grade code. Do not use it for real value. The wallet, rollup, and proving service may reset, break, or change without notice. Your wallet data in <code style="font-family:var(--mono);font-size:0.88em">~/.tzel-wallet</code> is not backed up by any server &mdash; if you lose it, there is no recovery. Back it up yourself.
+        TzEL is research-grade code. Do not use it for real value. The wallet, rollup, and proving service may reset, break, or change without notice. Your wallet data in <code class="ic-plain">~/.tzel-wallet</code> is not backed up by any server &mdash; if you lose it, there is no recovery. Back it up yourself.
       </div>
     </div>
 
@@ -941,15 +944,16 @@
     <div class="cta-section">
       <div class="cta-inner">
         <h2>Ready to try it?</h2>
-        <p>One command installs and starts the wallet. Open <code style="font-family:var(--mono);color:var(--blue-light);font-size:0.92em">http://127.0.0.1:8787</code> when it exits.</p>
+        <p>One command installs and starts the wallet. Open <code class="ic">http://127.0.0.1:8787</code> when it exits.</p>
         <div class="install-block" style="margin-bottom:28px">
           <div class="install-bar">
             <div class="install-dots"><span></span><span></span><span></span></div>
             <span class="install-label">terminal</span>
             <button class="copy-btn" onclick="
-              navigator.clipboard.writeText('curl -sSL https://tzel.tezos.com/wallet-install.sh | sh');
-              this.textContent='copied';
-              setTimeout(() => this.textContent='copy', 1800);
+              var btn = this;
+              navigator.clipboard.writeText('curl -sSL ' + location.origin + '/wallet-install.sh | sh')
+                .then(function() { btn.textContent='copied'; setTimeout(function() { btn.textContent='copy'; }, 1800); })
+                .catch(function() { btn.textContent='copy failed'; setTimeout(function() { btn.textContent='copy'; }, 2500); });
             ">copy</button>
           </div>
           <div class="install-cmd">

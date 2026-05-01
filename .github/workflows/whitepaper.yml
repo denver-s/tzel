@@ -210,12 +210,14 @@ jobs:
             --content-type "text/html"
 
       - name: Upload wallet-install.sh
-        # Install scripts must be served as plain text so `curl | sh`
-        # receives bytes without content-encoding applied by the CDN.
+        # no-cache so every `curl | sh` fetches the latest version.
+        # Content-type must be set explicitly; S3 cannot infer it from
+        # the file extension when the key has no extension (not the case
+        # here, but good practice regardless).
         run: |
           aws s3 cp _site/wallet-install.sh \
             s3://${{ secrets.AWS_S3_BUCKET }}/wallet-install.sh \
-            --cache-control "public, max-age=60" \
+            --cache-control "no-cache" \
             --content-type "text/x-shellscript; charset=utf-8"
 
       - name: Invalidate CloudFront cache
