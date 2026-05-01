@@ -2,30 +2,25 @@
 
     Mirror of [cairo/src/blake_hash.cairo].
 
-    The Cairo file declares BLAKE2s-based hash functions parameterized
-    by a 32-byte personalization IV per use site (sighash, owner,
-    commit, nullifier, merkle, nk_spend, nk_tag, plus the WOTS+ ADRS
-    chain hash). Distinct IVs give independent functions for our
-    purposes — the same input under different IVs produces unrelated
-    outputs.
+    For now we declare only the hash flavors actually used by the
+    pieces of model written so far; more will land as additional
+    modules are filled in.
 
-    What we model here:
+    [Hash3] is the generic 3-input hash ([blake_hash::hash3_generic]
+    in Cairo) used by [xmss_chain_step] to mix [pub_seed], the
+    ADRS-encoded chain index, and the running chain element. Domain
+    separation comes from the ADRS encoding, not from a separate IV.
 
-    - The hash family as opaque parameters, one per IV-distinguished
-      use site.
-    - Collision-resistance, preimage-resistance, and PRF properties as
-      axioms over those parameters.
-
-    What we do NOT model:
-
-    - The concrete BLAKE2s round function. The Cairo implementation
-      computes BLAKE2s; the Coq side abstracts past it. The mapping
-      between "what the Cairo computes" and "the abstract H_* in this
-      file" is part of the cryptographic boundary — i.e., we lean on
-      "BLAKE2s with personalized IVs gives a CR/PRF-ish family" as a
-      heuristic at the boundary, not inside the proofs.
-
-    Status: stub. To be filled in alongside the first proof target.
+    The cryptographic abstraction here is intentional. The Coq side
+    treats [Hash3] as opaque and adds CR/PRF axioms when the proofs
+    need them. Soundness theorems should not depend on the hash being
+    a random oracle — relation-level soundness only needs standard-
+    model properties. The extraction realizes [Hash3] with a
+    bit-equivalent OCaml/Cairo hash so the differential check (in
+    [coq/Extracted]) can confirm that the model and the Cairo agree on
+    every tested witness.
 *)
 
 From Tzel Require Import Common.
+
+Parameter Hash3 : Felt -> Felt -> Felt -> Felt.
