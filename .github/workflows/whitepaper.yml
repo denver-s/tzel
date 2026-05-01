@@ -202,12 +202,11 @@ jobs:
             --content-type "application/pdf"
 
       - name: Upload wallet page
-        # Uploaded without a file extension so it serves at /wallet.
-        # Content-type must be set explicitly; S3 cannot infer it from
-        # a bare key name.
+        # Uploaded as `wallet.html` (with extension) so the canonical
+        # URL is https://tzel.tezos.com/wallet.html.
         run: |
           aws s3 cp _site/wallet.html \
-            s3://${{ secrets.AWS_S3_BUCKET }}/wallet \
+            s3://${{ secrets.AWS_S3_BUCKET }}/wallet.html \
             --cache-control "no-cache" \
             --content-type "text/html"
 
