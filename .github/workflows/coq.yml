@@ -1,0 +1,66 @@
+name: coq model
+
+# Drift-checks the Cairo↔Coq manifest and (when stubs become real
+# proofs) builds the Coq theory under coq/Tzel.
+#
+# Triggers:
+# - any push to main affecting coq/** or cairo/src/**.cairo (Cairo
+#   edits drive drift detection)
+# - same-paths PRs
+# - workflow_dispatch
+#
+# The build job is currently a placeholder — coq/Tzel/*.v are stubs.
+# It will start producing meaningful pass/fail signal once the first
+# real proof lands.
+
+on:
+  push:
+    branches: [main, coq-model]
+    paths:
+      - "coq/**"
+      - "cairo/src/**.cairo"
+      - ".github/workflows/coq.yml"
+  pull_request:
+    paths:
+      - "coq/**"
+      - "cairo/src/**.cairo"
+      - ".github/workflows/coq.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coq-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Drift check (Cairo SHAs vs MANIFEST.toml)
+        run: ./coq/Drift/check.sh
+
+  build:
+    runs-on: ubuntu-latest
+    needs: drift
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Coq
+        # Stock Ubuntu apt for now (Coq 8.18 in 24.04). When the proofs
+        # need mathcomp we'll switch to opam-via-setup-ocaml, same
+        # pattern as the OCaml unit tests workflow.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends coq
+
+      - name: Build Coq theory
+        working-directory: coq
+        run: |
+          coq_makefile -f _CoqProject -o Makefile
+          make -j2
