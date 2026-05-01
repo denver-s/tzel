@@ -16,8 +16,7 @@
     here (we are allowed to look at the Cairo); the [Spec] layer is
     derived from the protocol-level documents only.
 
-    The refinement theorem ([refines_spec], landing alongside the
-    [Spec] proofs) will state:
+    The refinement theorem [refines_spec] below states:
 
       forall x p k c s,
         xmss_chain_step x p k c s
@@ -31,6 +30,7 @@
 
 From Common Require Import Felt.
 From Impl Require Import Hashes.
+From Spec Require Wots.
 
 (** ADRS encoding of the chain-step address: [pack_adrs(TAG_XMSS_CHAIN,
     key_idx, chain_idx, step, 0)] in Cairo. Opaque here; the
@@ -47,3 +47,17 @@ Parameter pack_adrs_chain : nat -> nat -> nat -> Felt.
 Definition xmss_chain_step
   (x pub_seed : Felt) (key_idx chain_idx step : nat) : Felt :=
   Hash3 pub_seed (pack_adrs_chain key_idx chain_idx step) x.
+
+(** Refinement: the executable [xmss_chain_step] equals
+    [Spec.Wots.step] under the realized [Hash3] and
+    [pack_adrs_chain]. Trivial by [Definition] expansion — both
+    sides reduce to the same hash invocation. The point of stating
+    it is that any future [Spec.Wots]-level lemma about [step]
+    transfers to [xmss_chain_step] by rewriting through this
+    equation. *)
+Theorem refines_spec :
+  forall x pub_seed key_idx chain_idx step_no,
+    xmss_chain_step x pub_seed key_idx chain_idx step_no =
+    Spec.Wots.step Hash3 pack_adrs_chain
+                   x pub_seed key_idx chain_idx step_no.
+Proof. reflexivity. Qed.

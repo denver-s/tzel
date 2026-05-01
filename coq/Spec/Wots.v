@@ -17,17 +17,9 @@
     starting from value [x] under public seed [pub_seed], applies
     [F pub_seed (ADRS key_idx chain_idx step) x] iteratively, with
     [step] running through [start_step ..= start_step + n − 1].
-
-    Proofs land in follow-up commits. Targets:
-    - [iter_succ]: extending an [n]-step chain by one more step
-      equals one [step] applied to the [n]-step output.
-    - [iter_compose]: an [(n + m)]-step chain equals an [m]-step
-      chain run on the [n]-step output.
-    - The refinement theorem in [Impl.Wots] proves the executable
-      [Impl.xmss_chain_step] equals [Spec.step] under the realized
-      hash and ADRS, closing the spec ↔ extractable connection.
 *)
 
+From Coq Require Import Arith.
 From Common Require Import Felt.
 
 Section ChainStep.
@@ -70,5 +62,39 @@ Section ChainStep.
              (step x pub_seed key_idx chain_idx start_step)
              pub_seed key_idx chain_idx (S start_step)
     end.
+
+  (** Chain extension: an [n+1]-step chain equals one [step]
+      applied to the [n]-step output. The slightly subtle bit is
+      the step counter: the appended [step] uses [start_step + n]
+      because [iter] has already advanced the counter [n] times. *)
+  Lemma iter_succ
+        (n : nat) (x pub_seed : Felt)
+        (key_idx chain_idx start_step : nat) :
+    iter (S n) x pub_seed key_idx chain_idx start_step =
+    step (iter n x pub_seed key_idx chain_idx start_step)
+         pub_seed key_idx chain_idx (start_step + n).
+  Proof.
+    revert x start_step.
+    induction n as [|k IH]; intros x start_step.
+    - simpl. now rewrite Nat.add_0_r.
+    - simpl. rewrite IH. simpl. now rewrite Nat.add_succ_r.
+  Qed.
+
+  (** Chain concatenation: an [(n + m)]-step chain equals an
+      [m]-step chain run on the [n]-step output, with the step
+      counter offset by [n]. *)
+  Lemma iter_compose
+        (n m : nat) (x pub_seed : Felt)
+        (key_idx chain_idx start_step : nat) :
+    iter (n + m) x pub_seed key_idx chain_idx start_step =
+    iter m
+         (iter n x pub_seed key_idx chain_idx start_step)
+         pub_seed key_idx chain_idx (start_step + n).
+  Proof.
+    revert x start_step.
+    induction n as [|k IH]; intros x start_step.
+    - simpl. now rewrite Nat.add_0_r.
+    - simpl. rewrite IH. simpl. now rewrite Nat.add_succ_r.
+  Qed.
 
 End ChainStep.
