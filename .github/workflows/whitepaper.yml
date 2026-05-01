@@ -204,13 +204,6 @@ jobs:
       - name: Upload wallet page
         # Uploaded as `wallet.html` (with extension) so the canonical
         # URL is https://tzel.tezos.com/wallet.html.
-        #
-        # The previous bare-key upload (`s3://.../wallet`) was unreachable
-        # through CloudFront: the distribution's URL-rewrite Lambda@Edge
-        # 302-redirects extension-less paths to a trailing slash form
-        # (/wallet → /wallet/) and then expects a `wallet/index.html`
-        # object, which we don't publish. Keeping the `.html` extension
-        # bypasses that rewrite path entirely.
         run: |
           aws s3 cp _site/wallet.html \
             s3://${{ secrets.AWS_S3_BUCKET }}/wallet.html \
