@@ -1,7 +1,10 @@
-name: coq model
+name: rocq model
 
-# Drift-checks the Cairo↔Coq manifest, builds the Coq theory under
-# coq/Tzel, and runs a smoke test on the extracted-to-OCaml driver.
+# Drift-checks the Cairo↔Impl manifest and builds the Rocq theory under
+# coq/. The build job uses Rocq 9 via opam (same opam-via-setup-ocaml
+# pattern as the OCaml unit tests workflow) so the dependency surface
+# stays inside actions/* + opam packages, no third-party Docker
+# images.
 #
 # Triggers:
 # - any push to main affecting coq/** or cairo/src/**.cairo (Cairo
@@ -11,12 +14,9 @@ name: coq model
 #   main while it's under development)
 # - workflow_dispatch
 #
-# Smoke test: with the placeholder hash + pack_adrs realizations in
-# Tzel/Extraction.v, the extracted xmss_chain_step always returns the
-# zero felt. The smoke just confirms the Coq → OCaml extraction
-# pipeline compiles and the driver runs end-to-end. The next commit
-# wires real OCaml hash realizations and adds a differential check
-# against the Cairo xmss_chain_step.
+# Extraction + QCheck2 conformance runs land later — see coq/STATUS.md
+# for current progress against the recommended Spec → Impl →
+# extracted-OCaml ↔ Cairo architecture.
 
 on:
   push:
@@ -36,7 +36,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: coq-${{ github.ref }}
+  group: rocq-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -56,33 +56,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Install Coq + OCaml
-        # Stock Ubuntu apt (Coq 8.18 + OCaml 4.x in 24.04). When
-        # proofs need mathcomp we'll switch to opam-via-setup-ocaml,
-        # same pattern as the OCaml unit tests workflow. For now,
-        # plain Coq stdlib + ocamlc is enough.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends coq ocaml
+      - name: Set up OCaml + opam
+        uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014  # v3
+        with:
+          ocaml-compiler: "5.2.0"
 
-      - name: Build Coq theory (compiles modules and extracts to OCaml)
+      - name: Install Rocq
+        run: opam install -y rocq-prover
+
+      - name: Build Rocq theory
         working-directory: coq
         run: |
-          coq_makefile -f _CoqProject -o Makefile
-          make -j2
-
-      - name: Build extracted-Coq OCaml driver
-        run: ./coq/Extracted/build.sh
-
-      - name: Smoke run extracted driver (placeholder hash → expect zero felt)
-        run: |
-          out=$(./coq/Extracted/chain_step \
-            "0000000000000000000000000000000000000000000000000000000000000000" \
-            "0000000000000000000000000000000000000000000000000000000000000000" \
-            0 0 0)
-          echo "extracted xmss_chain_step output: $out"
-          expected="0000000000000000000000000000000000000000000000000000000000000000"
-          if [[ "$out" != "$expected" ]]; then
-            echo "::error::expected $expected, got $out"
-            exit 1
-          fi
+          opam exec -- rocq makefile -f _CoqProject -o Makefile
+          opam exec -- make -j2

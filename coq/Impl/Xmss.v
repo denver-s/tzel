@@ -1,4 +1,4 @@
-(** * Tzel.Xmss
+(** * Impl.Xmss
 
     Mirror of the XMSS portion of [cairo/src/xmss_common.cairo].
 
@@ -38,6 +38,6 @@
     Status: stub.
 *)
 
-From Tzel Require Import Common.
-From Tzel Require Import Hashes.
-From Tzel Require Import Wots.
+From Common Require Import Felt.
+From Impl Require Import Hashes.
+From Impl Require Import Wots.

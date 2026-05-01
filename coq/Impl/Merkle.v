@@ -1,4 +1,4 @@
-(** * Tzel.Merkle
+(** * Impl.Merkle
 
     Mirror of [cairo/src/merkle.cairo].
 
@@ -23,5 +23,5 @@
     Status: stub.
 *)
 
-From Tzel Require Import Common.
-From Tzel Require Import Hashes.
+From Common Require Import Felt.
+From Impl Require Import Hashes.

@@ -1,4 +1,4 @@
-(** * Tzel.Unshield
+(** * Impl.Unshield
 
     Mirror of [cairo/src/unshield.cairo].
 
@@ -29,8 +29,8 @@
     Status: stub.
 *)
 
-From Tzel Require Import Common.
-From Tzel Require Import Hashes.
-From Tzel Require Import Merkle.
-From Tzel Require Import Wots.
-From Tzel Require Import Xmss.
+From Common Require Import Felt.
+From Impl Require Import Hashes.
+From Impl Require Import Merkle.
+From Impl Require Import Wots.
+From Impl Require Import Xmss.

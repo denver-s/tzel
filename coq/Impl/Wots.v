@@ -1,8 +1,6 @@
-(** * Tzel.Wots
+(** * Impl.Wots — extractable WOTS+ chain step (Cairo refinement)
 
-    Mirror of the WOTS+ portion of [cairo/src/xmss_common.cairo].
-
-    The Cairo file declares:
+    Mirror of the WOTS+ portion of [cairo/src/xmss_common.cairo]:
 
       pub fn xmss_chain_step(
         x: felt252, pub_seed: felt252,
@@ -12,20 +10,27 @@
         hash::hash3_generic(pub_seed, adrs, x)
       }
 
-    We mirror it here. The ADRS encoding ([pack_adrs] in Cairo) is
-    captured here as the opaque parameter [pack_adrs_chain]: it bakes
-    in the [TAG_XMSS_CHAIN] tag and the trailing zero, exposing only
-    the three indices the chain step varies over. The full [pack_adrs]
-    will land alongside the L-tree and auth-tree mirrors when those
-    modules need it.
+    Position in the architecture: this module is the *implementation*
+    layer — the executable, extractable refinement of the abstract
+    chain step in [Spec.Wots]. The Cairo source informs the structure
+    here (we are allowed to look at the Cairo); the [Spec] layer is
+    derived from the protocol-level documents only.
 
-    [xmss_chain_step] is then a one-liner. The full chain iteration
-    ([xmss_chain_iter] / the inner loop of [xmss_recover_pk]) lands
-    next.
+    The refinement theorem ([refines_spec], landing alongside the
+    [Spec] proofs) will state:
+
+      forall x p k c s,
+        xmss_chain_step x p k c s
+          = Spec.Wots.step Hash3 pack_adrs_chain x p k c s
+
+    which by [Definition] expansion holds reflexively. The theorem
+    is what closes the [Spec] ↔ [Impl] connection so that any
+    [Spec.Wots]-level soundness lemma transfers automatically to
+    the extracted code.
 *)
 
-From Tzel Require Import Common.
-From Tzel Require Import Hashes.
+From Common Require Import Felt.
+From Impl Require Import Hashes.
 
 (** ADRS encoding of the chain-step address: [pack_adrs(TAG_XMSS_CHAIN,
     key_idx, chain_idx, step, 0)] in Cairo. Opaque here; the
