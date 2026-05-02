@@ -8,6 +8,8 @@
 \usepackage{array}
 \usepackage{xcolor}
 
+\setlength{\emergencystretch}{3em}
+
 \hypersetup{
   colorlinks=true,
   linkcolor=blue!45!black,
@@ -20,6 +22,7 @@
 \newcommand{\cm}{\mathsf{cm}}
 \newcommand{\nf}{\mathsf{nf}}
 \newcommand{\rcm}{\mathsf{rcm}}
+\newcommand{\depositkey}{\texttt{deposit:}\allowbreak\texttt{<hex(}\allowbreak\texttt{pubkey\_hash}\allowbreak\texttt{)>}}
 
 \title{\TzEL: Tezos Encrypted Ledger\\
 \large Post-Quantum Shielded Transactions on Tezos Smart Rollups}
@@ -453,8 +456,8 @@ pools without a bounded brute-force scan over candidate
 \((i, j)\) pairs followed by per-candidate kernel balance probes.
 
 \paragraph{Aggregation and dust resistance.} Multiple L1 tickets to the
-same \texttt{deposit:<hex(pubkey\_hash)>} recipient string aggregate into
-one balance. The \texttt{deposit:<hex(pubkey\_hash)>} string is public on
+same \depositkey{} recipient string aggregate into
+one balance. The \depositkey{} string is public on
 L1: an attacker observing a victim's deposit and dust-depositing the
 same recipient string just adds to the victim's pool balance. Mirror-
 depositing is therefore a donation rather than a brick — the attacker pays
@@ -472,10 +475,10 @@ The circuit proves the user commitment, the producer-fee commitment, the
 condition \(producer\_fee > 0\), and \emph{verifies an in-circuit WOTS+
 signature} from the recipient's auth tree (the same scheme used by
 transfer and unshield). The signed message is the shield sighash:
-\[
-\Hash_{sigh}(0x03,\, auth\_domain,\, pubkey\_hash,\, v_{pub},\, fee,\, producer\_fee,\,
+\begin{multline*}
+\Hash_{sigh}(0x03,\, auth\_domain,\, pubkey\_hash,\, v_{pub},\, fee,\, producer\_fee,\\
               \cm_{user},\, \cm_{producer},\, mh_{user},\, mh_{producer}).
-\]
+\end{multline*}
 The kernel reads \(balance = \mathrm{pool}[pubkey\_hash]\), rejects unless
 \(balance \ge v_{pub} + fee + producer\_fee\), debits the pool, and
 appends both notes. Pool overfunding is fine — the surplus stays
@@ -515,7 +518,7 @@ payable to an address they control — a wallet that routes fees
 elsewhere simply does not get bundled.
 
 \paragraph{Top-ups and partial drains.} A user can send multiple L1
-tickets to the same \texttt{deposit:<hex(pubkey\_hash)>} recipient; each
+tickets to the same \depositkey{} recipient; each
 ticket adds to the pool's balance. Each shield then debits some
 \((v_{pub} + fee + producer\_fee)\) at the user's discretion. Shielding
 is not exclusive of further deposits or further shields: pools live as
