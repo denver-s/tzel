@@ -61,55 +61,40 @@ Strict requirement: **no `admit` anywhere**. Every theorem closes.
 - **`Impl/{Merkle,Xmss,Transfer,Shield,Unshield}.v`:** stubs with
   intent docs and updated imports (`From Common Require Import
   Felt`, etc.).
+- **`Spec/Wots.v` chain-step lemmas:** `iter_succ` and
+  `iter_compose` proved (induction on `n` with `Nat.add_succ_r` /
+  `Nat.add_0_r`). Foundation for upcoming L-tree and full-XMSS
+  proofs.
+- **`Impl/Wots.v` refinement:** `Theorem refines_spec` closes by
+  `reflexivity` — `xmss_chain_step` equals `Spec.Wots.step` under
+  the realized `Hash3` / `pack_adrs_chain`. Future Spec-level
+  lemmas about `step` now transfer to the extractable function.
+- **Extraction + OCaml driver (re-port):** `Impl/Extraction.v`
+  realizes `Felt → bytes`, `Hash3` / `pack_adrs_chain` as
+  zero-stubs, `nat → int`, and writes `tzel_wots.{ml,mli}` to
+  `coq/Impl/`. `coq/Extracted/build.sh` copies them next to a
+  60-line `main.ml` driver and links with plain `ocamlc` (no
+  opam, no dune). CI builds the driver and smoke-asserts the
+  placeholder-hash output is the zero felt — the Rocq → OCaml
+  pipeline is exercised end-to-end.
 
 ## Not done
 
-### Spec-layer proofs (next concrete piece)
+### Real `Hash3` / `pack_adrs_chain` realizations (next concrete piece)
 
-In `Spec/Wots.v`, prove:
+Replace the zero-stubs in `Impl/Extraction.v` with the bit-
+equivalent OCaml protocol-port functions:
 
-```
-Lemma iter_succ : forall n x p k c s,
-  iter (S n) x p k c s = step (iter n x p k c s) p k c (s + n).
+- `Hash3` → `Tzel.Hash.hash3` (BLAKE2s with personalized IV)
+- `pack_adrs_chain` → wrapper around `Tzel.Wots.pack_adrs` that
+  bakes in `TAG_XMSS_CHAIN` + the trailing zero
 
-Lemma iter_compose : forall n m x p k c s,
-  iter (n + m) x p k c s = iter m (iter n x p k c s) p k c (s + n).
-```
-
-Both are induction-on-n with `Nat.add_succ_r` / `Nat.add_0_r`
-arithmetic. Needs `Require Import Arith.` (or Rocq equivalent).
-~30 lines of proof total. Scoping rationale: smallest piece that
-lands a real proof in the Spec layer; subsequent properties
-(L-tree compression, full XMSS verifier) build on these.
-
-### Impl-side refinement theorems
-
-In `Impl/Wots.v`, after the Spec lemmas are in place:
-
-```
-Theorem refines_spec : forall x p k c s,
-  xmss_chain_step x p k c s = Spec.Wots.step Hash3 pack_adrs_chain x p k c s.
-Proof. reflexivity. Qed.
-```
-
-Trivial by `Definition` expansion — but states the connection
-explicitly so future Spec-level theorems transfer to Impl.
-
-### Extraction + OCaml driver
-
-Was attempted in the previous coq-model commit (61f5cd5) with a
-placeholder hash; the OCaml build step in CI failed and was
-removed during this restructure. Reintroduce as:
-
-1. `Impl/Extraction.v` writes extracted .ml/.mli for the
-   currently-modeled Impl functions (start with `xmss_chain_step`).
-2. `coq/Extracted/` directory with a build script that compiles the
-   extracted code + a small driver, linking against the OCaml
-   protocol port (`tzel` library) for the realizations of `Hash3`
-   and `pack_adrs_chain` — `Tzel.Hash.hash3` and
-   `Tzel.Wots.pack_adrs` are bit-equivalent to the Cairo via the
-   existing cross-impl interop check.
-3. CI step: build extracted driver, smoke-run on a fixed witness.
+Both are bit-equivalent to the Cairo under the existing cross-impl
+interop check, so the extracted driver's output will match the
+Cairo `xmss_chain_step` on the same input. Touches:
+`Impl/Extraction.v`, `coq/Extracted/build.sh` (link against the
+`tzel` opam library or vendored OCaml port), and the CI smoke
+needs a non-zero expected output (or a basic round-trip).
 
 ### Cairo runner for differential check
 
@@ -179,9 +164,11 @@ When picking this back up:
 1. `git checkout coq-model`
 2. Read `coq/STATUS.md` (this file)
 3. Re-read `coq/README.md` for the architecture refresher
-4. Pick the next concrete piece — currently: prove `iter_succ` and
-   `iter_compose` in `Spec/Wots.v`, then add the trivial refinement
-   theorem in `Impl/Wots.v`, then reintroduce extraction +
-   `coq/Extracted/` driver
+4. Pick the next concrete piece — currently: replace the zero-stub
+   `Hash3` / `pack_adrs_chain` realizations in `Impl/Extraction.v`
+   with the bit-equivalent OCaml protocol-port functions
+   (`Tzel.Hash.hash3` / a wrapper around `Tzel.Wots.pack_adrs`),
+   then update CI to assert a non-zero expected output. Cairo
+   `run_chain_step` runner + QCheck2 differential follow.
 5. Run CI on each commit; the build job will catch syntax issues
    that can't be caught locally without an opam Rocq install

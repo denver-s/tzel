@@ -14,9 +14,13 @@ name: rocq model
 #   main while it's under development)
 # - workflow_dispatch
 #
-# Extraction + QCheck2 conformance runs land later — see coq/STATUS.md
-# for current progress against the recommended Spec → Impl →
-# extracted-OCaml ↔ Cairo architecture.
+# Extraction is wired in via Impl/Extraction.v — `make` builds the
+# theory and side-effects writing tzel_wots.{ml,mli} into coq/Impl/.
+# The Extracted/ build script then compiles those + a small driver
+# into a `chain_step` binary; the smoke step runs it and asserts the
+# placeholder-hash output is the zero felt (proves the Rocq → OCaml
+# pipeline works end-to-end). QCheck2 differential conformance
+# against the Cairo runner lands next — see coq/STATUS.md.
 
 on:
   push:
@@ -64,8 +68,24 @@ jobs:
       - name: Install Rocq
         run: opam install -y rocq-prover
 
-      - name: Build Rocq theory
+      - name: Build Rocq theory (compiles modules and extracts to OCaml)
         working-directory: coq
         run: |
           opam exec -- rocq makefile -f _CoqProject -o Makefile
           opam exec -- make -j2
+
+      - name: Build extracted-Rocq OCaml driver
+        run: opam exec -- ./coq/Extracted/build.sh
+
+      - name: Smoke run extracted driver (placeholder hash → expect zero felt)
+        run: |
+          out=$(./coq/Extracted/chain_step \
+            "0000000000000000000000000000000000000000000000000000000000000000" \
+            "0000000000000000000000000000000000000000000000000000000000000000" \
+            0 0 0)
+          echo "extracted xmss_chain_step output: $out"
+          expected="0000000000000000000000000000000000000000000000000000000000000000"
+          if [[ "$out" != "$expected" ]]; then
+            echo "::error::expected $expected, got $out"
+            exit 1
+          fi
