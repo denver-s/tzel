@@ -19,7 +19,7 @@
     [step] running through [start_step ..= start_step + n − 1].
 *)
 
-From Coq Require Import Arith.
+From Stdlib Require Import Arith.
 From Common Require Import Felt.
 
 Section ChainStep.
@@ -63,6 +63,20 @@ Section ChainStep.
              pub_seed key_idx chain_idx (S start_step)
     end.
 
+  (** One-step unfolding of [iter]. By [Definition] expansion this
+      is [reflexivity], but having it as an explicit lemma lets
+      [rewrite] do exactly one unfold step — which we need in the
+      [iter_succ] / [iter_compose] proofs because [simpl] / [cbn]
+      keep unfolding [iter] past the form where the inductive
+      hypothesis matches. *)
+  Lemma iter_S_unfold
+        (n : nat) (x pub_seed : Felt)
+        (key_idx chain_idx start_step : nat) :
+    iter (S n) x pub_seed key_idx chain_idx start_step =
+    iter n (step x pub_seed key_idx chain_idx start_step)
+         pub_seed key_idx chain_idx (S start_step).
+  Proof. reflexivity. Qed.
+
   (** Chain extension: an [n+1]-step chain equals one [step]
       applied to the [n]-step output. The slightly subtle bit is
       the step counter: the appended [step] uses [start_step + n]
@@ -76,8 +90,12 @@ Section ChainStep.
   Proof.
     revert x start_step.
     induction n as [|k IH]; intros x start_step.
-    - simpl. now rewrite Nat.add_0_r.
-    - simpl. rewrite IH. simpl. now rewrite Nat.add_succ_r.
+    - cbn [iter]. now rewrite Nat.add_0_r.
+    - rewrite (iter_S_unfold (S k)).
+      rewrite IH.
+      rewrite (iter_S_unfold k).
+      rewrite Nat.add_succ_r.
+      reflexivity.
   Qed.
 
   (** Chain concatenation: an [(n + m)]-step chain equals an
@@ -93,8 +111,12 @@ Section ChainStep.
   Proof.
     revert x start_step.
     induction n as [|k IH]; intros x start_step.
-    - simpl. now rewrite Nat.add_0_r.
-    - simpl. rewrite IH. simpl. now rewrite Nat.add_succ_r.
+    - cbn [iter Nat.add]. now rewrite Nat.add_0_r.
+    - rewrite (iter_S_unfold (k + m)).
+      rewrite IH.
+      rewrite (iter_S_unfold k).
+      rewrite Nat.add_succ_r.
+      reflexivity.
   Qed.
 
 End ChainStep.

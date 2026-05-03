@@ -24,7 +24,7 @@
     [coq/Extracted/] copies the file into place for the OCaml driver.
 *)
 
-From Coq Require Extraction.
+From Stdlib Require Extraction.
 From Common Require Import Felt.
 From Impl Require Import Hashes.
 From Impl Require Import Wots.
