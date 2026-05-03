@@ -18,10 +18,10 @@
     same input, and the differential driver (also planned for the
     next commit) will start exercising that equivalence.
 
-    Note: extraction writes [tzel_wots.ml] / [tzel_wots.mli] to the
-    directory [coqc] runs from when processing this file. With our
-    [_CoqProject], that's [coq/Impl/]. The build script in
-    [coq/Extracted/] copies the file into place for the OCaml driver.
+    Note: extraction writes [tzel_wots.ml] / [tzel_wots.mli] to
+    [Impl/] (relative to where [rocq make] runs, which is [coq/]).
+    The build script in [coq/Extracted/] copies the file into place
+    for the OCaml driver.
 *)
 
 From Stdlib Require Extraction.
@@ -30,6 +30,13 @@ From Impl Require Import Hashes.
 From Impl Require Import Wots.
 
 Extraction Language OCaml.
+
+(** Force the extraction output directory so the [.ml]/[.mli] files
+    land alongside [Impl/Extraction.v] regardless of where [rocq
+    make] is invoked from. Without this, Rocq 9 defaults to the
+    current working directory and emits a [extraction-default-
+    directory] warning. *)
+Set Extraction Output Directory "Impl".
 
 (** Realize [Felt] as OCaml [bytes] (32-byte buffer), matching
     [tzel/protocol/felt.ml] in the OCaml port. *)
