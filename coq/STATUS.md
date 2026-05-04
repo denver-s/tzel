@@ -111,6 +111,25 @@ Strict requirement: **no `admit` anywhere**. Every theorem closes.
   reference value computed via the OCaml port directly
   (`5ca134c7…155466807`).
 
+- **Soundness infrastructure (CR + binding):**
+  - `Spec/Hashes.v`: `injective_2`, `injective_4`, `node_injective`
+    — collision resistance modeled as injectivity. Taken as Section
+    hypotheses, never globally axiomatized.
+  - `Spec/Merkle.v`: `merkle_binding` — same root + position bits
+    implies same leaf AND siblings (under CR). `auth_binding` — same
+    for the XMSS auth tree with per-slot node hash injectivity.
+  - `Spec/Xmss.v`: `pair_nodes_injective` — pairwise L-tree
+    compression is injective under CR.
+  - `Spec/Xmss.v`: `xmss_verify_unique_leaf` — two signatures
+    verifying against the same root and position recover the same
+    leaf. Follows from `auth_binding`.
+- **XMSS completeness:** `xmss_completeness` — if a signer has
+  valid secret keys, signs with valid digits, and provides a correct
+  auth path, then `xmss_verify` holds. Assembles `recover_all_correct`
+  + `ltree_succeeds` + auth-path hypothesis.
+- **Sighash + nullifier definitions:** `sighash_fold` with
+  composition proof, `commitment`, `nullifier` (position-dependent).
+
 ## Not done
 
 ### Cairo runner for differential check (next concrete piece)
