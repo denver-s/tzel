@@ -115,6 +115,52 @@ Section LTree.
     ltree (a :: b :: nil) = Some (H_node 0 0 a b).
   Proof. reflexivity. Qed.
 
+  (** Triple: exercises the odd-element carry.  The last element
+      [c] is unpaired at level 0, then paired with the hash of
+      [(a, b)] at level 1. *)
+  Lemma ltree_triple (a b c : Felt) :
+    ltree (a :: b :: c :: nil) =
+    Some (H_node 1 0 (H_node 0 0 a b) c).
+  Proof. reflexivity. Qed.
+
+  (** [ltree_aux] succeeds on non-empty input when fuel is
+      sufficient.  The fuel bound [length nodes <= S fuel] is mild:
+      [ltree] uses [fuel := length nodes] which always satisfies it.
+      Proof by induction on [fuel]: at each step, [pair_nodes]
+      strictly shrinks the list (from ≥ 2 elements to ≤ n − 1). *)
+  Lemma ltree_aux_succeeds : forall fuel nodes level,
+    nodes <> nil ->
+    length nodes <= S fuel ->
+    exists v, ltree_aux fuel nodes level = Some v.
+  Proof.
+    induction fuel as [| f IH]; intros nodes level Hne Hlen.
+    - (* fuel = 0: nodes must be a singleton *)
+      destruct nodes as [| x [| y rest]].
+      + contradiction.
+      + exists x. reflexivity.
+      + simpl in Hlen. lia.
+    - (* fuel = S f *)
+      destruct nodes as [| x [| y rest]].
+      + contradiction.
+      + exists x. reflexivity.
+      + change (exists v,
+          ltree_aux f (pair_nodes (x :: y :: rest) level 0) (S level)
+          = Some v).
+        apply IH.
+        * simpl. congruence.
+        * specialize (pair_nodes_length_le rest level 1).
+          simpl in Hlen. simpl. lia.
+  Qed.
+
+  (** [ltree] succeeds on any non-empty input. *)
+  Theorem ltree_succeeds (nodes : list Felt) :
+    nodes <> nil ->
+    exists v, ltree nodes = Some v.
+  Proof.
+    intro Hne. unfold ltree.
+    apply ltree_aux_succeeds; [exact Hne | lia].
+  Qed.
+
 End LTree.
 
 (* ================================================================ *)
@@ -165,6 +211,26 @@ Section WotsRecover.
     apply Wots.recover_correct. exact Hle.
   Qed.
 
+  (** [recover_all] preserves length when digits and signature
+      have equal length. *)
+  Lemma recover_all_length : forall key_idx start_chain digits sig,
+    length digits = length sig ->
+    length (recover_all key_idx start_chain digits sig) = length digits.
+  Proof.
+    intros key_idx start_chain digits.
+    revert start_chain.
+    induction digits as [| d ds IH]; intros start_chain sig Hlen.
+    - destruct sig; [reflexivity | discriminate].
+    - destruct sig as [| s ss]; [discriminate |].
+      simpl. f_equal. apply IH. simpl in Hlen. congruence.
+  Qed.
+
+  (** [recover_all] on non-empty equal-length inputs is non-empty. *)
+  Lemma recover_all_nonempty (key_idx start_chain : nat)
+      (d : nat) (ds : list nat) (s : Felt) (ss : list Felt) :
+    recover_all key_idx start_chain (d :: ds) (s :: ss) <> nil.
+  Proof. simpl. congruence. Qed.
+
 End WotsRecover.
 
 (* ================================================================ *)
@@ -201,3 +267,78 @@ Section XmssVerify.
     end.
 
 End XmssVerify.
+
+(* ================================================================ *)
+(** ** Bit decomposition and nat-based auth-tree walk                *)
+(* ================================================================ *)
+
+(** Decompose a natural number into [n] LSB-first bits.  Mirrors
+    the Cairo loop's [idx & 1] / [idx /= 2] pattern. *)
+Fixpoint nat_to_bits (n idx : nat) : list bool :=
+  match n with
+  | O => nil
+  | S k => Nat.odd idx :: nat_to_bits k (idx / 2)
+  end.
+
+Lemma nat_to_bits_length (n idx : nat) :
+  length (nat_to_bits n idx) = n.
+Proof.
+  revert idx.
+  induction n as [| k IH]; intros idx; simpl.
+  - reflexivity.
+  - f_equal. apply IH.
+Qed.
+
+Section AuthWalk.
+
+  Variable H_node : nat -> nat -> Felt -> Felt -> Felt.
+
+  (** Nat-based auth-tree walk.  Directly mirrors the Cairo
+      [xmss_verify_auth] loop (without pre-computing a bit list).
+      Walks [n] levels, halving [idx] each step. *)
+  Fixpoint auth_walk (n : nat) (siblings : list Felt)
+      (current : Felt) (idx level : nat) : Felt :=
+    match n, siblings with
+    | S k, s :: ss =>
+        auth_walk k ss
+          (if Nat.odd idx
+           then H_node level (idx / 2) s current
+           else H_node level (idx / 2) current s)
+          (idx / 2) (S level)
+    | _, _ => current
+    end.
+
+  (** [auth_walk] equals [auth_root] when the bits are derived from
+      the index via [nat_to_bits].  This bridges the Cairo's integer-
+      based loop to the spec's list-of-booleans formulation. *)
+  Theorem auth_walk_bits (n : nat) (siblings : list Felt)
+      (current : Felt) (idx level : nat) :
+    length siblings = n ->
+    auth_walk n siblings current idx level =
+    Merkle.auth_root H_node (nat_to_bits n idx) siblings
+                     current idx level.
+  Proof.
+    revert siblings current idx level.
+    induction n as [| k IH]; intros siblings current idx level Hlen.
+    - destruct siblings; [reflexivity | discriminate].
+    - destruct siblings as [| s ss]; [discriminate |].
+      simpl. apply IH. simpl in Hlen. congruence.
+  Qed.
+
+End AuthWalk.
+
+(** The [idx == 0] assertion in the Cairo verifier.  After dividing
+    [idx] by 2 a total of [n] times, the result is zero iff
+    [idx < 2^n].  This is the mathematical content of
+    [assert(idx == 0, 'xmss key idx out of range')]. *)
+Lemma idx_zero_iff_in_range (idx n : nat) :
+  idx / 2 ^ n = 0 <-> idx < 2 ^ n.
+Proof.
+  assert (Hpos : 2 ^ n <> 0) by (induction n; simpl; lia).
+  split.
+  - intro Hdiv.
+    pose proof (Nat.div_mod idx (2 ^ n) Hpos) as Heq.
+    rewrite Hdiv, Nat.mul_0_r, Nat.add_0_l in Heq.
+    rewrite Heq. apply Nat.mod_upper_bound. exact Hpos.
+  - apply Nat.div_small.
+Qed.

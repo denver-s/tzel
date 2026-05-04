@@ -137,3 +137,30 @@ Section AuthTree.
   Proof. reflexivity. Qed.
 
 End AuthTree.
+
+(* ================================================================ *)
+(** ** Connection between uniform and indexed variants                *)
+(* ================================================================ *)
+
+(** When the node hash ignores its level and position arguments,
+    [auth_root] degenerates to [merkle_root].  This connects the
+    XMSS auth tree specification to the simpler commitment tree
+    specification, and lets proofs about [merkle_root] (like path
+    composition) transfer to [auth_root] in the uniform-hash
+    special case. *)
+Theorem auth_merkle_uniform
+    (H : Felt -> Felt -> Felt)
+    (bits : list bool) (siblings : list Felt)
+    (leaf : Felt) (level : nat) :
+  auth_root (fun _ _ => H) bits siblings leaf 0 level =
+  merkle_root H bits siblings leaf.
+Proof.
+  revert siblings leaf level.
+  induction bits as [| b bs IH]; intros siblings leaf level.
+  - destruct siblings; reflexivity.
+  - destruct siblings as [| s ss]; [reflexivity |].
+    change (auth_root (fun _ _ => H) bs ss
+      (if b then H s leaf else H leaf s) 0 (S level) =
+      merkle_root H bs ss (if b then H s leaf else H leaf s)).
+    apply IH.
+Qed.
