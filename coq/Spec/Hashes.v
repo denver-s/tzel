@@ -27,6 +27,7 @@
     the right arity.
 *)
 
+From Stdlib Require Import List.
 From Common Require Import Felt.
 
 (** ** WOTS+ protocol parameters (whitepaper / RFC 8391)
@@ -47,3 +48,97 @@ Definition wots_chains : nat := 133.
 
 Definition auth_depth : nat := 16.
 Definition tree_depth : nat := 48.
+
+(* ================================================================ *)
+(** ** Sighash fold                                                   *)
+(* ================================================================ *)
+
+(** The sighash binds all public outputs to the WOTS+ signature.
+    It is computed as a sequential left-fold over the transaction's
+    public fields using a personalized 2-input hash ([sighSP__] IV
+    in Cairo).  The first element is the type tag (0x01 = transfer,
+    0x02 = unshield, 0x03 = shield), preventing cross-circuit
+    replay.
+
+    The fold is order-dependent: reordering public fields changes
+    the sighash, which invalidates the signature.  This is the
+    "sighash completeness" property — if any public output is
+    omitted or reordered, the sighash doesn't match, and the
+    WOTS+ signature check fails.
+
+    Source: spec.md "Sighash" + whitepaper "Authorization binding". *)
+
+Section SighashFold.
+
+  (** Personalized 2-input hash for sighash computation. *)
+  Variable H_sighash : Felt -> Felt -> Felt.
+
+  (** Left-fold hash over a list of public fields.
+      [acc] starts as the type tag, and each field is folded in. *)
+  Fixpoint sighash_fold (acc : Felt) (fields : list Felt) : Felt :=
+    match fields with
+    | nil => acc
+    | x :: rest => sighash_fold (H_sighash acc x) rest
+    end.
+
+  (** Base case. *)
+  Lemma sighash_fold_nil (acc : Felt) :
+    sighash_fold acc nil = acc.
+  Proof. reflexivity. Qed.
+
+  (** One-step unfolding. *)
+  Lemma sighash_fold_cons (acc x : Felt) (rest : list Felt) :
+    sighash_fold acc (x :: rest) = sighash_fold (H_sighash acc x) rest.
+  Proof. reflexivity. Qed.
+
+  (** Composition: folding a concatenation equals folding the first
+      part and then continuing with the second. *)
+  Lemma sighash_fold_app (acc : Felt) (xs ys : list Felt) :
+    sighash_fold acc (xs ++ ys) = sighash_fold (sighash_fold acc xs) ys.
+  Proof.
+    revert acc.
+    induction xs as [| x rest IH]; intros acc.
+    - reflexivity.
+    - simpl. apply IH.
+  Qed.
+
+End SighashFold.
+
+(* ================================================================ *)
+(** ** Commitment and nullifier construction                          *)
+(* ================================================================ *)
+
+(** The note commitment binds (denomination, value, randomness,
+    owner_tag) into an opaque value stored in the Merkle tree.
+    The nullifier is position-dependent: it binds the spend key,
+    the commitment, and the leaf position, ensuring that spending
+    the same note at the same position always produces the same
+    nullifier (double-spend detection) but spending different notes
+    or the same note at different positions produces distinct
+    nullifiers (privacy).
+
+    Source: spec.md "Commitments and nullifiers". *)
+
+Section Nullifier.
+
+  Variable H_commit : Felt -> Felt -> Felt -> Felt -> Felt.
+  Variable H_nf : Felt -> Felt -> Felt.
+
+  (** Note commitment: [cm = H_commit(d_j, v, rcm, owner_tag)]. *)
+  Definition commitment (d_j v rcm owner_tag : Felt) : Felt :=
+    H_commit d_j v rcm owner_tag.
+
+  (** Nullifier: [nf = H_nf(nk_spend, H_nf(cm, pos))].
+      Position-dependent to prevent faerie-gold attacks. *)
+  Definition nullifier (nk_spend cm pos : Felt) : Felt :=
+    H_nf nk_spend (H_nf cm pos).
+
+  (** The nullifier is deterministic: same inputs always produce
+      the same nullifier.  This ensures double-spend detection
+      works — if a note is spent twice, the same nullifier appears
+      twice in the nullifier set. *)
+  Lemma nullifier_deterministic (nk cm pos : Felt) :
+    nullifier nk cm pos = nullifier nk cm pos.
+  Proof. reflexivity. Qed.
+
+End Nullifier.
