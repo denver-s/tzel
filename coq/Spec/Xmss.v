@@ -211,6 +211,53 @@ Section WotsRecover.
     apply Wots.recover_correct. exact Hle.
   Qed.
 
+  (** Generate WOTS+ public key endpoints from secret keys.
+      Each secret key is chained forward [wots_chain_len] steps. *)
+  Fixpoint gen_pk (key_idx start_chain : nat)
+      (sks : list Felt) : list Felt :=
+    match sks with
+    | sk :: rest =>
+        Wots.iter F ADRS_chain wots_chain_len
+                  sk pub_seed key_idx start_chain 0
+          :: gen_pk key_idx (S start_chain) rest
+    | nil => nil
+    end.
+
+  (** Sign: chain each secret key forward by its digit.  The
+      resulting list is the WOTS+ signature. *)
+  Fixpoint sign (key_idx start_chain : nat)
+      (digits : list nat) (sks : list Felt) : list Felt :=
+    match digits, sks with
+    | d :: ds, sk :: rest =>
+        Wots.iter F ADRS_chain d sk pub_seed key_idx start_chain 0
+          :: sign key_idx (S start_chain) ds rest
+    | _, _ => nil
+    end.
+
+  (** Correctness of WOTS+ recovery: verifying a correctly-produced
+      signature recovers the public key.  This is the completeness
+      direction — correct signatures pass verification.  Each chain's
+      recovery invokes [Wots.recover_correct] under the hood. *)
+  Theorem recover_all_correct (key_idx start_chain : nat)
+      (digits : list nat) (sks : list Felt) :
+    length digits = length sks ->
+    Forall (fun d => d <= wots_chain_len) digits ->
+    recover_all key_idx start_chain digits
+                (sign key_idx start_chain digits sks) =
+    gen_pk key_idx start_chain sks.
+  Proof.
+    revert start_chain sks.
+    induction digits as [| d ds IH]; intros start_chain sks Hlen Hdigits.
+    - destruct sks; [reflexivity | discriminate].
+    - destruct sks as [| sk rest]; [discriminate |].
+      simpl. f_equal.
+      + apply recover_endpoint_correct.
+        inversion Hdigits; assumption.
+      + apply IH.
+        * simpl in Hlen. congruence.
+        * inversion Hdigits; assumption.
+  Qed.
+
   (** [recover_all] preserves length when digits and signature
       have equal length. *)
   Lemma recover_all_length : forall key_idx start_chain digits sig,
@@ -265,6 +312,41 @@ Section XmssVerify.
                          leaf key_idx 0 = auth_root_val
     | None => False
     end.
+
+  (** Full XMSS completeness: if a signer has valid secret keys,
+      produces a correct signature using valid digits, and provides
+      the correct auth path, then [xmss_verify] holds.
+
+      This assembles the pieces:
+      - [recover_all_correct]: recovery produces the public key
+      - [ltree_succeeds]: L-tree compression succeeds
+      - Auth-root equality: the auth path reaches the stored root *)
+  Theorem xmss_completeness
+      (key_idx : nat) (digits : list nat) (sks : list Felt)
+      (auth_bits : list bool) (auth_siblings : list Felt)
+      (auth_root_val : Felt) :
+    length digits = length sks ->
+    sks <> nil ->
+    Forall (fun d => d <= wots_chain_len) digits ->
+    (* The auth path from the L-tree leaf reaches the root *)
+    (forall leaf,
+       ltree H_node (gen_pk F ADRS_chain pub_seed key_idx 0 sks) = Some leaf ->
+       Merkle.auth_root H_node auth_bits auth_siblings
+                        leaf key_idx 0 = auth_root_val) ->
+    xmss_verify key_idx digits
+                (sign F ADRS_chain pub_seed key_idx 0 digits sks)
+                auth_bits auth_siblings auth_root_val.
+  Proof.
+    intros Hlen Hne Hdigits Hauth.
+    unfold xmss_verify.
+    rewrite (recover_all_correct F ADRS_chain pub_seed
+               key_idx 0 digits sks Hlen Hdigits).
+    destruct (ltree_succeeds H_node
+               (gen_pk F ADRS_chain pub_seed key_idx 0 sks)) as [leaf Hleaf].
+    - (* gen_pk sks <> nil when sks <> nil *)
+      destruct sks; [contradiction | simpl; congruence].
+    - rewrite Hleaf. apply Hauth. exact Hleaf.
+  Qed.
 
 End XmssVerify.
 
