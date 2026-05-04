@@ -26,7 +26,8 @@
     is bound to the specific recipient and amount published as
     public outputs," which the sighash already captures.
 
-    Status: stub.
+    Status: safety predicate defined in [Spec.Unshield];
+    implementation-side refinement pending.
 *)
 
 From Common Require Import Felt.
@@ -34,3 +35,4 @@ From Impl Require Import Hashes.
 From Impl Require Import Merkle.
 From Impl Require Import Wots.
 From Impl Require Import Xmss.
+From Spec Require Unshield.

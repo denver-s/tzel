@@ -31,10 +31,12 @@
     obligation is "the in-circuit signature binds [pubkey_hash] to a
     leaf in the recipient's auth tree."
 
-    Status: stub.
+    Status: safety predicate defined in [Spec.Shield];
+    implementation-side refinement pending.
 *)
 
 From Common Require Import Felt.
 From Impl Require Import Hashes.
 From Impl Require Import Wots.
 From Impl Require Import Xmss.
+From Spec Require Shield.

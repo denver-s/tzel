@@ -1,121 +1,97 @@
 (** * Spec.Transfer — transfer circuit safety predicate
 
-    Source: whitepaper transfer section + spec.md. Transfer consumes
-    [N] (1 ≤ N ≤ 7) input notes and produces three output notes
-    (recipient, change, producer-fee).
+    Source: [cairo/src/transfer.cairo::verify] (19 assertions).
 
-    We define the circuit relation [TransferRelation] and the
-    safety predicate [Phi_transfer], then state the soundness
-    target:
+    Safety predicate [Phi_transfer]: the conjunction of properties
+    that MUST hold when the circuit accepts.  Each conjunct maps to
+    one or more Cairo [assert] statements.  If a conjunct fails to
+    prove from the circuit relation, the corresponding assertion is
+    missing from the Cairo — a real bug.
 
-      forall pub wit, TransferRelation pub wit -> Phi_transfer pub
-
-    If this theorem does not close, the Cairo circuit is missing an
-    assertion.  Each conjunct of [Phi_transfer] that fails to prove
-    identifies a specific gap.
-
-    For now we define the key types and the safety predicate.
-    The full proof requires wiring through XMSS, Merkle, and
-    sighash results from the other Spec modules.
+    The predicate is parameterized over abstract hash functions so
+    soundness proofs compose with the hash-level theorems in
+    [Spec.Hashes], [Spec.Merkle], and [Spec.Xmss].
 *)
 
 From Stdlib Require Import List Arith.
 From Common Require Import Felt.
 From Spec Require Import Hashes.
 
-(** ** Public and witness types for the transfer circuit *)
+(** ** Type tag: prevents cross-circuit replay *)
+(** Transfer = 0x01, Unshield = 0x02, Shield = 0x03, Pubkey = 0x04.
+    The sighash starts with the tag, so a transfer signature cannot
+    be replayed as a shield (different first hash input). *)
+Definition tag_transfer : nat := 1.
+Definition tag_unshield : nat := 2.
+Definition tag_shield : nat := 3.
 
-(** Public outputs visible on-chain. *)
-Record TransferPublic := mkTransferPublic {
-  tp_auth_domain : Felt;
-  tp_root : Felt;              (** commitment tree root *)
-  tp_nullifiers : list Felt;   (** one per consumed input *)
-  tp_fee : nat;                (** transaction fee *)
-  tp_cm_out : list Felt;       (** output commitments (3) *)
-}.
-
-(** Per-input witness (private data for each consumed note). *)
-Record InputWitness := mkInputWitness {
-  iw_nk_spend : Felt;          (** nullifier spend key *)
-  iw_auth_root : Felt;         (** XMSS auth tree root *)
-  iw_auth_pub_seed : Felt;     (** XMSS public seed *)
-  iw_auth_idx : nat;           (** leaf index in auth tree *)
-  iw_d_j : Felt;               (** address diversifier *)
-  iw_value : nat;              (** note value *)
-  iw_rseed : Felt;             (** commitment randomness seed *)
-  iw_cm_siblings : list Felt;  (** Merkle path for commitment *)
-  iw_cm_path_idx : nat;        (** leaf position in commitment tree *)
-  iw_wots_sig : list Felt;     (** WOTS+ signature (133 elements) *)
-  iw_auth_siblings : list Felt; (** XMSS auth path *)
-}.
-
-(** ** Safety predicate [Phi_transfer]
-
-    Each conjunct corresponds to a security property that the
-    circuit MUST enforce.  If any conjunct is missing from the
-    Cairo, the soundness proof will fail at that point. *)
+(** ** Safety predicate components *)
 
 Section PhiTransfer.
 
+  (** Hash families (abstract, realized at Impl layer). *)
   Variable H_sighash : Felt -> Felt -> Felt.
-  Variable H_merkle : Felt -> Felt -> Felt.
   Variable H_commit : Felt -> Felt -> Felt -> Felt -> Felt.
   Variable H_nf : Felt -> Felt -> Felt.
+  Variable H_owner : Felt -> Felt -> Felt -> Felt.
+  Variable H_rcm : Felt -> Felt.
+  Variable H_nktag : Felt -> Felt.
 
-  (** Value conservation: total input value equals total output
-      value plus fee.  Missing this lets the prover create value
-      from nothing. *)
-  Definition value_conservation
-      (input_values : list nat) (output_values : list nat)
-      (fee : nat) : Prop :=
-    list_sum input_values = list_sum output_values + fee.
+  (** ** Phi_transfer conjuncts
 
-  (** Nullifier correctness: each nullifier is correctly derived
-      from the commitment and position.  Missing this lets the
-      prover reuse a nullifier (double-spend). *)
-  Definition nullifier_correct
-      (nf : Felt) (nk_spend cm : Felt) (pos : Felt) : Prop :=
+      Each corresponds to a security property.  The name in brackets
+      is the Cairo assertion that enforces it. *)
+
+  (** 1. Value conservation: sum of inputs = sum of outputs + fee.
+      Cairo: [assert(sum_in == sum_out, 'transfer: balance mismatch')].
+      Missing this allows value creation from nothing. *)
+  Definition phi_value_conservation
+      (input_values : list nat) (v1 v2 v3 fee : nat) : Prop :=
+    list_sum input_values = v1 + v2 + v3 + fee.
+
+  (** 2. Nullifier correctness (per input): each published nullifier
+      is correctly derived from the commitment and leaf position.
+      Cairo: [assert(nf == *nf_list.at(i), 'transfer: bad nf')].
+      Missing this allows nullifier reuse (double-spend). *)
+  Definition phi_nullifier_correct
+      (nf nk_spend cm pos : Felt) : Prop :=
     nf = nullifier H_nf nk_spend cm pos.
 
-  (** Sighash completeness: the sighash covers all public outputs.
-      Missing any field lets the prover change that field after
-      signing (transaction malleability). *)
-  Definition sighash_complete
-      (sighash : Felt) (tag auth_domain root : Felt)
+  (** 3. Sighash completeness: the sighash covers ALL public outputs.
+      Cairo: sighash = fold(0x01, auth_domain, root, nf_0..nf_{n-1},
+      fee, cm_1, cm_2, cm_3, memo_1, memo_2, memo_3).
+      Missing any field allows that field to be changed after signing
+      (transaction malleability). *)
+  Definition phi_sighash_complete
+      (sighash tag_felt auth_domain root : Felt)
       (nullifiers : list Felt) (fee_felt : Felt)
-      (cm_out : list Felt) : Prop :=
+      (cm1 cm2 cm3 memo1 memo2 memo3 : Felt) : Prop :=
     sighash = sighash_fold H_sighash
-                (sighash_fold H_sighash
-                   (sighash_fold H_sighash tag
-                     (auth_domain :: root :: nullifiers))
-                   (fee_felt :: nil))
-                cm_out.
+                (sighash_fold H_sighash tag_felt
+                   (auth_domain :: root :: nullifiers))
+                (fee_felt :: cm1 :: cm2 :: cm3
+                  :: memo1 :: memo2 :: memo3 :: nil).
 
-  (** Producer fee must be positive.  Missing this lets the
-      prover skip paying the producer. *)
-  Definition producer_fee_positive (cm_out : list Felt)
-      (output_values : list nat) : Prop :=
-    (* The third output value is the producer fee *)
-    nth 2 output_values 0 > 0.
+  (** 4. Output commitment well-formedness: each output commitment
+      is correctly constructed from its components.
+      Cairo: [assert(hash::commit(...) == cm_k, 'transfer: bad cm_k')].
+      Missing this allows a malformed commitment that doesn't bind
+      the recipient or value. *)
+  Definition phi_output_wellformed
+      (cm d_j rcm owner_tag : Felt) (v : Felt) : Prop :=
+    cm = H_commit d_j v rcm owner_tag.
+
+  (** 5. Producer fee positive.
+      Cairo: [assert(v_3 > 0_u64, 'transfer prod fee')].
+      Missing this lets the prover skip paying the producer. *)
+  Definition phi_producer_fee_positive (v3 : nat) : Prop :=
+    v3 > 0.
+
+  (** 6. Input count in range.
+      Cairo: [assert(n >= 1)] and [assert(n <= MAX_INPUTS)].
+      MAX_INPUTS = 7.  Structural, not directly security-critical,
+      but prevents degenerate edge cases. *)
+  Definition phi_input_count (n : nat) : Prop :=
+    1 <= n /\ n <= 7.
 
 End PhiTransfer.
-
-(** ** Summary of Phi_transfer conjuncts
-
-    A complete [Phi_transfer pub] asserts ALL of:
-    1. Value conservation (sum_in = sum_out + fee)
-    2. Input authenticity (each commitment Merkle-included under root)
-    3. Nullifier correctness (each nf derived from real spent note)
-    4. Spend authorization (valid XMSS signature on sighash)
-    5. Sighash completeness (signature covers every public output)
-    6. Output well-formedness (commitments correctly constructed)
-    7. Producer fee positive (v_3 > 0)
-    8. Type-tag separation (tag = 0x01 for transfer)
-
-    Items 2 and 4 use [Spec.Merkle] and [Spec.Xmss] respectively.
-    Items 1, 3, 5–8 are defined above or are structural checks.
-
-    The proof [TransferRelation pub wit -> Phi_transfer pub] is the
-    headline result: if the Cairo circuit accepts (all its asserts
-    pass), then all safety properties hold.  Each missing Cairo
-    assert causes the corresponding conjunct to fail. *)

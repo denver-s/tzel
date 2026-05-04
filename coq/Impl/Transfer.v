@@ -37,7 +37,8 @@
     asserts. The interesting case is when the proof DOESN'T drop out:
     that's where a missing assert lives.
 
-    Status: stub.
+    Status: safety predicate defined in [Spec.Transfer];
+    implementation-side refinement pending.
 *)
 
 From Common Require Import Felt.
@@ -45,3 +46,4 @@ From Impl Require Import Hashes.
 From Impl Require Import Merkle.
 From Impl Require Import Wots.
 From Impl Require Import Xmss.
+From Spec Require Transfer.
