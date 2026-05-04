@@ -648,6 +648,227 @@ Section AuthWalk.
 End AuthWalk.
 
 (* ================================================================ *)
+(** ** WOTS+ checksum argument and unforgeability                    *)
+(* ================================================================ *)
+
+(** The WOTS+ checksum prevents an adversary from changing all digits
+    upward (which would be trivially computable by forward chaining).
+    The argument: if [d'_i >= d_i] for all 133 chains and both digit
+    vectors have correct checksums, then [d' = d].
+
+    Contrapositive: if [d ≠ d'], at least one chain has [d'_j < d_j],
+    forcing the adversary to invert the hash (find a preimage). *)
+
+(** Sum of a list of nats. *)
+Fixpoint list_sum (xs : list nat) : nat :=
+  match xs with
+  | nil => 0
+  | x :: rest => x + list_sum rest
+  end.
+
+(** Base-4 value of digits (LSB first). *)
+Fixpoint base4_val (ds : list nat) : nat :=
+  match ds with
+  | nil => 0
+  | d :: rest => d + 4 * base4_val rest
+  end.
+
+(** WOTS+ checksum: [sum(3 - d_i)] over message digits. *)
+Definition checksum (msg : list nat) : nat :=
+  list_sum (map (fun d => 3 - d) msg).
+
+(** Helper: nat subtraction anti-monotonicity with sub_add. *)
+Lemma sub_le_implies_le (a b n : nat) :
+  a <= n -> b <= n -> n - a <= n - b -> b <= a.
+Proof.
+  intros Ha Hb Hsub.
+  pose proof (Nat.sub_add a n Ha).
+  pose proof (Nat.sub_add b n Hb).
+  lia.
+Qed.
+
+(** Pointwise >= implies sum >=. *)
+Lemma list_sum_forall2_ge (xs ys : list nat) :
+  Forall2 (fun x y => x >= y) xs ys ->
+  list_sum xs >= list_sum ys.
+Proof.
+  induction 1 as [| x y xs ys Hge _ IH]; simpl; lia.
+Qed.
+
+(** Pointwise >= with equal sums implies pointwise =. *)
+Lemma list_sum_forall2_eq (xs ys : list nat) :
+  Forall2 (fun x y => x >= y) xs ys ->
+  list_sum xs = list_sum ys ->
+  xs = ys.
+Proof.
+  induction 1 as [| x y xs ys Hge Hf2 IH]; intro Hsum.
+  - reflexivity.
+  - simpl in Hsum.
+    pose proof (list_sum_forall2_ge _ _ Hf2).
+    f_equal; [lia | apply IH; lia].
+Qed.
+
+(** base4_val is monotone under pointwise >=. *)
+Lemma base4_val_forall2_ge (xs ys : list nat) :
+  Forall2 (fun x y => x >= y) xs ys ->
+  base4_val xs >= base4_val ys.
+Proof.
+  induction 1 as [| x y xs ys Hge _ IH]; simpl; lia.
+Qed.
+
+(** base4_val + pointwise >= + range constraints => equal.
+    Key step: [x + 4a = y + 4b] with [x,y < 4] and [x >= y]
+    forces [x = y] and [a = b]. *)
+Lemma base4_val_forall2_eq (xs ys : list nat) :
+  Forall2 (fun x y => x >= y) xs ys ->
+  Forall (fun x => x <= 3) xs ->
+  Forall (fun y => y <= 3) ys ->
+  base4_val xs = base4_val ys ->
+  xs = ys.
+Proof.
+  induction 1 as [| x y xs ys Hge Hf2 IH];
+    intros Hxr Hyr Hval.
+  - reflexivity.
+  - inversion Hxr as [| ? ? Hx Hxr']; subst.
+    inversion Hyr as [| ? ? Hy Hyr']; subst.
+    simpl in Hval.
+    pose proof (base4_val_forall2_ge _ _ Hf2).
+    assert (x = y) by lia.
+    assert (base4_val xs = base4_val ys) by lia.
+    f_equal; [assumption | apply IH; assumption].
+Qed.
+
+(** Checksum is anti-monotone: larger digits => smaller checksum. *)
+Lemma checksum_anti_mono (msg msg' : list nat) :
+  Forall (fun d => d <= 3) msg ->
+  Forall (fun d => d <= 3) msg' ->
+  Forall2 (fun d' d => d' >= d) msg' msg ->
+  checksum msg' <= checksum msg.
+Proof.
+  intros Hr Hr' Hge.
+  unfold checksum.
+  enough (list_sum (map (fun d => 3 - d) msg) >=
+          list_sum (map (fun d => 3 - d) msg')).
+  { lia. }
+  apply list_sum_forall2_ge.
+  clear Hr Hr'.
+  induction Hge as [| d' d ms ms' Hge _ IH]; constructor; [lia | exact IH].
+Qed.
+
+(** Pointwise >= on digits with equal checksums => equal digits. *)
+Lemma checksum_ge_eq (msg msg' : list nat) :
+  Forall (fun d => d <= 3) msg ->
+  Forall (fun d => d <= 3) msg' ->
+  Forall2 (fun d' d => d' >= d) msg' msg ->
+  checksum msg' = checksum msg ->
+  msg' = msg.
+Proof.
+  intros Hmr Hmr'.
+  revert msg Hmr.
+  induction Hmr' as [| d' ms' Hd' Hr' IH]; intros msg Hmr Hmge Hcseq.
+  - inversion Hmge. reflexivity.
+  - destruct msg as [| d ms]; [inversion Hmge |].
+    inversion Hmge as [| ? ? ? ? Hge Hf2]; subst.
+    pose proof (Forall_inv Hmr) as Hd.
+    pose proof (Forall_inv_tail Hmr) as Hr.
+    pose proof (checksum_anti_mono _ _ Hr Hr' Hf2) as Hanti.
+    (* d' = d: sub_le_implies_le needs 3-d <= 3-d' *)
+    assert (Hdle : d' <= d).
+    { apply (sub_le_implies_le d d' 3 Hd Hd').
+      (* Goal: 3-d <= 3-d'.  From: (3-d')+cs'=(3-d)+cs, cs'<=cs *)
+      unfold checksum in Hcseq, Hanti.
+      set (f := fun d0 : nat => 3 - d0) in *.
+      (* Step 1: (3-d') + sum(f ms') <= (3-d') + sum(f ms) *)
+      assert (H1 : f d' + list_sum (map f ms') <= f d' + list_sum (map f ms))
+        by (apply Nat.add_le_mono_l; exact Hanti).
+      (* Step 2: substitute equation *)
+      change (list_sum (map f (d' :: ms')))
+        with (f d' + list_sum (map f ms')) in Hcseq.
+      change (list_sum (map f (d :: ms)))
+        with (f d + list_sum (map f ms)) in Hcseq.
+      (* Step 3: (3-d)+sum(f ms) <= (3-d')+sum(f ms) *)
+      assert (H2 : f d + list_sum (map f ms) <= f d' + list_sum (map f ms))
+        by (rewrite <- Hcseq; exact H1).
+      (* Step 4: cancel sum(f ms) *)
+      exact (proj2 (Nat.add_le_mono_r _ _ _) H2). }
+    assert (Hdeq : d' = d) by (apply Nat.le_antisymm; assumption).
+    subst d'. f_equal.
+    apply IH; [assumption | assumption |].
+    (* checksum ms' = checksum ms: from Hcseq with d'=d cancelled *)
+    unfold checksum in Hcseq |- *.
+    change (list_sum (map (fun d0 => 3 - d0) (d :: ms')))
+      with ((3 - d) + list_sum (map (fun d0 => 3 - d0) ms')) in Hcseq.
+    change (list_sum (map (fun d0 => 3 - d0) (d :: ms)))
+      with ((3 - d) + list_sum (map (fun d0 => 3 - d0) ms)) in Hcseq.
+    apply (Nat.add_cancel_l _ _ (3 - d)). exact Hcseq.
+Qed.
+
+(** *** The no-dominance theorem
+
+    If all digits of [D'] are >= the digits of [D], and both have
+    correct checksums, then [D' = D].  This is the mathematical
+    core of WOTS+ one-time security. *)
+Theorem wots_no_dominance
+    (msg msg' cs cs' : list nat) :
+  length msg = length msg' ->
+  Forall (fun d => d <= 3) msg ->
+  Forall (fun d => d <= 3) msg' ->
+  Forall (fun d => d <= 3) cs ->
+  Forall (fun d => d <= 3) cs' ->
+  base4_val cs = checksum msg ->
+  base4_val cs' = checksum msg' ->
+  Forall2 (fun d' d => d' >= d) msg' msg ->
+  Forall2 (fun d' d => d' >= d) cs' cs ->
+  msg' = msg /\ cs' = cs.
+Proof.
+  intros Hmlen Hmr Hmr' Hcr Hcr' Hcs Hcs' Hmge Hcge.
+  (* Checksum decreases: msg digits up => checksum down *)
+  assert (Hcsle : checksum msg' <= checksum msg)
+    by (apply checksum_anti_mono; assumption).
+  (* base4_val increases: cs digits up => value up *)
+  assert (Hbge : base4_val cs' >= base4_val cs)
+    by (apply base4_val_forall2_ge; assumption).
+  (* But cs' encodes checksum msg' and cs encodes checksum msg *)
+  (* So: base4_val cs' = checksum msg' <= checksum msg = base4_val cs *)
+  (* And: base4_val cs' >= base4_val cs *)
+  (* Therefore: base4_val cs' = base4_val cs *)
+  assert (Hbeq : base4_val cs' = base4_val cs) by lia.
+  (* Checksum digits equal *)
+  assert (Hceq : cs' = cs)
+    by (apply base4_val_forall2_eq; assumption).
+  (* Checksums equal *)
+  assert (Hcseq : checksum msg' = checksum msg) by lia.
+  (* Message digits equal *)
+  assert (Hmeq : msg' = msg)
+    by (apply checksum_ge_eq; assumption).
+  split; assumption.
+Qed.
+
+(** Contrapositive: different digits => at least one chain goes backward. *)
+Corollary wots_exists_backward
+    (msg msg' cs cs' : list nat) :
+  length msg = length msg' ->
+  length cs = length cs' ->
+  Forall (fun d => d <= 3) msg ->
+  Forall (fun d => d <= 3) msg' ->
+  Forall (fun d => d <= 3) cs ->
+  Forall (fun d => d <= 3) cs' ->
+  base4_val cs = checksum msg ->
+  base4_val cs' = checksum msg' ->
+  msg ++ cs <> msg' ++ cs' ->
+  (* Then: not all digits of D' are >= digits of D *)
+  ~ (Forall2 (fun d' d => d' >= d) msg' msg /\
+     Forall2 (fun d' d => d' >= d) cs' cs).
+Proof.
+  intros Hmlen Hclen Hmr Hmr' Hcr Hcr' Hcs Hcs' Hne [Hmge Hcge].
+  apply Hne.
+  destruct (wots_no_dominance msg msg' cs cs'
+              Hmlen Hmr Hmr' Hcr Hcr' Hcs Hcs' Hmge Hcge)
+    as [Hmeq Hceq].
+  rewrite Hmeq, Hceq. reflexivity.
+Qed.
+
+(* ================================================================ *)
 (** ** Full verification predicates matching Cairo assertions         *)
 (* ================================================================ *)
 
