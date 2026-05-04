@@ -148,4 +148,36 @@ Section ChainStep.
     reflexivity.
   Qed.
 
+  (** Chain injectivity: if the same number of hash steps from
+      different starting values produce the same output, then the
+      starting values must be equal.
+
+      This is the per-chain binding property: two different signature
+      elements for the same digit can't produce the same endpoint.
+      Combined with [recover_correct], this means a valid signature
+      element is uniquely determined by its digit and the secret key.
+
+      Requires: [F] is injective in its third argument (the chain
+      element), given fixed first two arguments (pub_seed, ADRS).
+      This models second-preimage resistance of the hash. *)
+  Theorem iter_injective
+      (H_F_inj : forall a b x1 x2, F a b x1 = F a b x2 -> x1 = x2) :
+    forall n (x1 x2 pub_seed : Felt)
+           (key_idx chain_idx start_step : nat),
+      iter n x1 pub_seed key_idx chain_idx start_step =
+      iter n x2 pub_seed key_idx chain_idx start_step ->
+      x1 = x2.
+  Proof.
+    induction n as [| k IH]; intros x1 x2 pub_seed key_idx chain_idx
+                              start_step Heq.
+    - exact Heq.
+    - rewrite (iter_S_unfold k x1 pub_seed key_idx chain_idx start_step)
+        in Heq.
+      rewrite (iter_S_unfold k x2 pub_seed key_idx chain_idx start_step)
+        in Heq.
+      apply IH in Heq.
+      unfold step in Heq.
+      exact (H_F_inj _ _ _ _ Heq).
+  Qed.
+
 End ChainStep.

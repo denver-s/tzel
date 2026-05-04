@@ -363,6 +363,23 @@ Section WotsRecover.
         * inversion Hdigits; assumption.
   Qed.
 
+  (** Per-chain binding: for the SAME digit, two signature elements
+      that recover to the same endpoint must be equal.  Follows from
+      [Wots.iter_injective] (chain injectivity under hash SPR). *)
+  Theorem recover_endpoint_binding
+      (H_F_inj : hash3_third_injective F)
+      (key_idx chain_idx digit : nat) (sig1 sig2 : Felt) :
+    digit <= wots_chain_len ->
+    recover_endpoint key_idx chain_idx digit sig1 =
+    recover_endpoint key_idx chain_idx digit sig2 ->
+    sig1 = sig2.
+  Proof.
+    intros Hle Heq. unfold recover_endpoint in Heq.
+    exact (Wots.iter_injective F ADRS_chain H_F_inj
+             (wots_chain_len - digit) sig1 sig2 pub_seed
+             key_idx chain_idx digit Heq).
+  Qed.
+
   (** [recover_all] preserves length when digits and signature
       have equal length. *)
   Lemma recover_all_length : forall key_idx start_chain digits sig,

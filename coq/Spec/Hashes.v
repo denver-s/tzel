@@ -81,6 +81,15 @@ Definition node_injective
     H_node level nidx a b = H_node level nidx c d ->
     a = c /\ b = d.
 
+(** Third-argument injectivity of the 3-input hash (chain hash).
+    Models second-preimage resistance: given [F(a, b, x)], finding
+    [x' ≠ x] with [F(a, b, x') = F(a, b, x)] is hard.  Weaker
+    than full injectivity — only the chain element (third arg) must
+    be recoverable; the key and ADRS (first two args) are fixed by
+    the protocol context. *)
+Definition hash3_third_injective (F : Felt -> Felt -> Felt -> Felt) : Prop :=
+  forall a b x1 x2, F a b x1 = F a b x2 -> x1 = x2.
+
 (* ================================================================ *)
 (** ** Sighash fold                                                   *)
 (* ================================================================ *)
