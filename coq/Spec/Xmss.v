@@ -647,6 +647,95 @@ Section AuthWalk.
 
 End AuthWalk.
 
+(* ================================================================ *)
+(** ** Full verification predicates matching Cairo assertions         *)
+(* ================================================================ *)
+
+(** These definitions mirror the EXACT assertions in the Cairo code.
+    Each Cairo [assert] becomes a conjunct.  If a conjunct is removed,
+    the corresponding soundness proof fails, identifying the gap.
+
+    Source: [cairo/src/merkle.cairo::verify] and
+    [cairo/src/xmss_common.cairo::xmss_verify_auth]. *)
+
+Section CairoAssertions.
+
+  Variable H_merkle : Felt -> Felt -> Felt.
+  Variable H_node : nat -> nat -> Felt -> Felt -> Felt.
+
+  (** Commitment-tree Merkle verification.  Three assertions from
+      [cairo/src/merkle.cairo::verify]:
+      1. [siblings.len() == TREE_DEPTH]
+      2. [idx == 0] after walking (path_indices < 2^TREE_DEPTH)
+      3. [current == root] *)
+  Definition merkle_verify
+      (leaf root : Felt) (siblings : list Felt)
+      (path_indices : nat) : Prop :=
+    length siblings = tree_depth /\
+    path_indices < 2 ^ tree_depth /\
+    merkle_root H_merkle (nat_to_bits tree_depth path_indices)
+                siblings leaf = root.
+
+  (** XMSS auth-tree verification.  Three assertions from
+      [cairo/src/xmss_common.cairo::xmss_verify_auth]:
+      1. [siblings.len() == AUTH_DEPTH]
+      2. [idx == 0] (key_idx < 2^AUTH_DEPTH)
+      3. [current == auth_root] *)
+  Definition auth_verify
+      (leaf auth_root_val : Felt) (siblings : list Felt)
+      (key_idx : nat) : Prop :=
+    length siblings = auth_depth /\
+    key_idx < 2 ^ auth_depth /\
+    auth_root H_node (nat_to_bits auth_depth key_idx)
+              siblings leaf key_idx 0 = auth_root_val.
+
+  (** The [merkle_verify] definition correctly uses [nat_to_bits]
+      to decompose the index, matching Cairo's [idx & 1] / [idx /= 2]
+      loop.  The equivalence is established by [auth_walk_bits]. *)
+
+  (** Full XMSS signature verification matching the Cairo flow:
+      [xmss_recover_pk] → [xmss_ltree] → [xmss_verify_auth].
+
+      This is the Cairo-faithful version of [xmss_verify] that
+      includes all three auth assertions and uses [nat_to_bits]
+      for bit decomposition (matching Cairo's integer loop). *)
+  Definition xmss_verify_cairo
+      (F : Felt -> Felt -> Felt -> Felt)
+      (ADRS_chain : nat -> nat -> nat -> Felt)
+      (pub_seed : Felt)
+      (key_idx : nat) (digits : list nat) (sig : list Felt)
+      (auth_siblings : list Felt) (auth_root_val : Felt) : Prop :=
+    let endpoints :=
+      recover_all F ADRS_chain pub_seed key_idx 0 digits sig in
+    match ltree H_node endpoints with
+    | Some leaf => auth_verify leaf auth_root_val auth_siblings key_idx
+    | None => False
+    end.
+
+  (** The Cairo-faithful [xmss_verify_cairo] is strictly stronger than
+      the spec-level [xmss_verify]: it includes the depth check and
+      the key-index range check.  This theorem shows the Cairo version
+      implies the spec version (the spec-level proofs transfer). *)
+  Theorem xmss_verify_cairo_implies_spec
+      (F : Felt -> Felt -> Felt -> Felt)
+      (ADRS_chain : nat -> nat -> nat -> Felt)
+      (pub_seed : Felt)
+      (key_idx : nat) (digits : list nat) (sig : list Felt)
+      (auth_siblings : list Felt) (auth_root_val : Felt) :
+    xmss_verify_cairo F ADRS_chain pub_seed
+      key_idx digits sig auth_siblings auth_root_val ->
+    xmss_verify F ADRS_chain H_node pub_seed
+      key_idx digits sig
+      (nat_to_bits auth_depth key_idx)
+      auth_siblings auth_root_val.
+  Proof.
+    unfold xmss_verify_cairo, xmss_verify, auth_verify.
+    destruct (ltree H_node _) as [leaf |]; [| contradiction].
+    intros [_ [_ Hroot]]. exact Hroot.
+  Qed.
+
+End CairoAssertions.
+
 (** The [idx == 0] assertion in the Cairo verifier.  After dividing
     [idx] by 2 a total of [n] times, the result is zero iff
     [idx < 2^n].  This is the mathematical content of
