@@ -14,13 +14,16 @@ name: rocq model
 #   main while it's under development)
 # - workflow_dispatch
 #
-# Extraction is wired in via Impl/Extraction.v — `make` builds the
+# Extraction wires through ocaml/coq_driver/ — `make` builds the
 # theory and side-effects writing tzel_wots.{ml,mli} into coq/Impl/.
-# The Extracted/ build script then compiles those + a small driver
-# into a `chain_step` binary; the smoke step runs it and asserts the
-# placeholder-hash output is the zero felt (proves the Rocq → OCaml
-# pipeline works end-to-end). QCheck2 differential conformance
-# against the Cairo runner lands next — see coq/STATUS.md.
+# coq/Extracted/build.sh copies those into ocaml/coq_driver/ and runs
+# `dune build` against the OCaml workspace, so the realizations for
+# Hash3 and pack_adrs_chain in Impl/Extraction.v resolve to the real
+# Tzel.Hash.hash3 / Tzel.Wots.pack_adrs from the protocol port. The
+# smoke step asserts a known reference vector (the all-zero input
+# hashes to a fixed felt under the OCaml port; the extracted driver
+# must produce the same byte-for-byte). Cairo-side run_chain_step
+# runner + QCheck2 differential land next — see coq/STATUS.md.
 
 on:
   push:
@@ -28,11 +31,13 @@ on:
     paths:
       - "coq/**"
       - "cairo/src/**.cairo"
+      - "ocaml/coq_driver/**"
       - ".github/workflows/coq.yml"
   pull_request:
     paths:
       - "coq/**"
       - "cairo/src/**.cairo"
+      - "ocaml/coq_driver/**"
       - ".github/workflows/coq.yml"
   workflow_dispatch:
 
@@ -56,17 +61,34 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: drift
+    env:
+      LIBRARY_PATH: ${{ github.workspace }}/ocaml/vendor/mlkem-native/test/build
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install OCaml system prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev pkg-config
 
       - name: Set up OCaml + opam
         uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014  # v3
         with:
           ocaml-compiler: "5.2.0"
 
-      - name: Install Rocq
-        run: opam install -y rocq-prover
+      - name: Install OCaml dependencies (tzel library + Rocq prover)
+        # Same opam package list as the unit-tests workflow's ocaml
+        # job — tzel links against these and the extracted driver
+        # links tzel. rocq-prover provides Rocq 9 and the extraction
+        # plugin.
+        run: |
+          opam install -y dune alcotest cstruct ctypes ctypes-foreign hex \
+                          mirage-crypto yojson digestif rocq-prover
+
+      - name: Build ML-KEM native library
+        # tzel transitively links libmlkem768 via foreign stubs.
+        run: make -C ocaml/vendor/mlkem-native lib
 
       - name: Build Rocq theory (compiles modules and extracts to OCaml)
         working-directory: coq
@@ -77,14 +99,20 @@ jobs:
       - name: Build extracted-Rocq OCaml driver
         run: opam exec -- ./coq/Extracted/build.sh
 
-      - name: Smoke run extracted driver (placeholder hash → expect zero felt)
+      - name: Smoke run extracted driver (zero-input reference vector)
+        # With the real Tzel.Hash.hash3 / Tzel.Wots.pack_adrs
+        # realizations, hashing 96 zero bytes (x || pack_adrs(...) ||
+        # pub_seed where pack_adrs of all-zero indices is just the
+        # 8-byte little-endian TAG_XMSS_CHAIN followed by zeros) under
+        # BLAKE2s-251 produces this fixed felt. Computed once via the
+        # OCaml port; the extracted driver must match byte-for-byte.
         run: |
           out=$(./coq/Extracted/chain_step \
             "0000000000000000000000000000000000000000000000000000000000000000" \
             "0000000000000000000000000000000000000000000000000000000000000000" \
             0 0 0)
           echo "extracted xmss_chain_step output: $out"
-          expected="0000000000000000000000000000000000000000000000000000000000000000"
+          expected="5ca134c7d8b26856b4dc9c748905318c23da49cac0fd56cc26c7885155466807"
           if [[ "$out" != "$expected" ]]; then
             echo "::error::expected $expected, got $out"
             exit 1

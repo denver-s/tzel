@@ -70,33 +70,26 @@ Strict requirement: **no `admit` anywhere**. Every theorem closes.
   the realized `Hash3` / `pack_adrs_chain`. Future Spec-level
   lemmas about `step` now transfer to the extractable function.
 - **Extraction + OCaml driver (re-port):** `Impl/Extraction.v`
-  realizes `Felt → bytes`, `Hash3` / `pack_adrs_chain` as
-  zero-stubs, `nat → int`, and writes `tzel_wots.{ml,mli}` to
-  `coq/Impl/`. `coq/Extracted/build.sh` copies them next to a
-  60-line `main.ml` driver and links with plain `ocamlc` (no
-  opam, no dune). CI builds the driver and smoke-asserts the
-  placeholder-hash output is the zero felt — the Rocq → OCaml
-  pipeline is exercised end-to-end.
+  realizes `Felt → bytes`, `nat → int`, and writes
+  `tzel_wots.{ml,mli}` to `coq/Impl/`. The driver moved from
+  `coq/Extracted/` into the OCaml dune workspace at
+  `ocaml/coq_driver/` so it can link against `tzel`.
+  `coq/Extracted/build.sh` orchestrates: copy the extracted
+  files into `ocaml/coq_driver/`, `dune build`, symlink the
+  binary back to `coq/Extracted/chain_step` for stable invocation.
+- **Real `Hash3` / `pack_adrs_chain` realizations:** the
+  extraction directives now wire to `Tzel.Hash.hash3` (BLAKE2s
+  of `pub_seed || ADRS || x`, truncated to 251 bits) and to
+  `Tzel.Wots.pack_adrs Tzel.Wots.tag_xmss_chain key chain step
+  0`, both bit-equivalent to the Cairo under the existing
+  cross-impl interop check. The CI smoke runs the driver on
+  the zero-input vector and asserts the result equals the
+  reference value computed via the OCaml port directly
+  (`5ca134c7…155466807`).
 
 ## Not done
 
-### Real `Hash3` / `pack_adrs_chain` realizations (next concrete piece)
-
-Replace the zero-stubs in `Impl/Extraction.v` with the bit-
-equivalent OCaml protocol-port functions:
-
-- `Hash3` → `Tzel.Hash.hash3` (BLAKE2s with personalized IV)
-- `pack_adrs_chain` → wrapper around `Tzel.Wots.pack_adrs` that
-  bakes in `TAG_XMSS_CHAIN` + the trailing zero
-
-Both are bit-equivalent to the Cairo under the existing cross-impl
-interop check, so the extracted driver's output will match the
-Cairo `xmss_chain_step` on the same input. Touches:
-`Impl/Extraction.v`, `coq/Extracted/build.sh` (link against the
-`tzel` opam library or vendored OCaml port), and the CI smoke
-needs a non-zero expected output (or a basic round-trip).
-
-### Cairo runner for differential check
+### Cairo runner for differential check (next concrete piece)
 
 Add `cairo/src/run_chain_step.cairo` as an executable target in
 `Scarb.toml`. Takes 5 felts as input, calls
@@ -164,11 +157,11 @@ When picking this back up:
 1. `git checkout coq-model`
 2. Read `coq/STATUS.md` (this file)
 3. Re-read `coq/README.md` for the architecture refresher
-4. Pick the next concrete piece — currently: replace the zero-stub
-   `Hash3` / `pack_adrs_chain` realizations in `Impl/Extraction.v`
-   with the bit-equivalent OCaml protocol-port functions
-   (`Tzel.Hash.hash3` / a wrapper around `Tzel.Wots.pack_adrs`),
-   then update CI to assert a non-zero expected output. Cairo
-   `run_chain_step` runner + QCheck2 differential follow.
+4. Pick the next concrete piece — currently: add the Cairo-side
+   `cairo/src/run_chain_step.cairo` executable target to
+   `Scarb.toml` so the same chain-step witness can be evaluated
+   from Cairo, then build a QCheck2 differential harness that
+   feeds randomized witnesses to the extracted driver and the
+   Cairo runner and asserts byte-equality.
 5. Run CI on each commit; the build job will catch syntax issues
    that can't be caught locally without an opam Rocq install

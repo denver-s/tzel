@@ -3,25 +3,32 @@
     Coq → OCaml extraction directives.
 
     Realizes the abstract [Felt] type and the opaque [Hash3] /
-    [pack_adrs_chain] parameters with concrete OCaml. For this first
-    end-to-end commit on the restructured layout the realizations are
-    placeholders — both [Hash3] and [pack_adrs_chain] return a fixed
-    zero felt — so the extracted code compiles and runs without
-    depending on the OCaml [tzel] library. The placeholder makes
-    [xmss_chain_step] degenerate (always zero) but exercises the
-    Coq → OCaml extraction pipeline end-to-end.
+    [pack_adrs_chain] parameters with the bit-equivalent OCaml
+    protocol-port functions:
 
-    The next commit will replace the placeholders with the bit-
-    equivalent [Tzel.Hash.hash3] and [Tzel.Wots.pack_adrs] from the
-    OCaml protocol port. At that point the extracted [xmss_chain_step]
-    will produce the same output as the Cairo [xmss_chain_step] on the
-    same input, and the differential driver (also planned for the
-    next commit) will start exercising that equivalence.
+    - [Felt] → OCaml [bytes] (32-byte little-endian, matching
+      [ocaml/protocol/felt.ml]).
+    - [Hash3] → [Tzel.Hash.hash3] (BLAKE2s of the 96-byte
+      concatenation [a || b || c], truncated to 251 bits).
+    - [pack_adrs_chain] → wrapper around [Tzel.Wots.pack_adrs]
+      that bakes in the [TAG_XMSS_CHAIN] domain tag and the
+      trailing zero, exposing exactly the three indices the
+      chain step varies over.
+
+    The OCaml port is bit-equivalent to the Cairo
+    [xmss_common::xmss_chain_step] under the existing cross-impl
+    interop check, so the extracted [xmss_chain_step] driver
+    matches the Cairo on the same inputs by construction. The
+    forthcoming Cairo-side [run_chain_step] runner plus a
+    QCheck2 differential harness will exercise that equivalence
+    on randomized witnesses.
 
     Note: extraction writes [tzel_wots.ml] / [tzel_wots.mli] to
     [Impl/] (relative to where [rocq make] runs, which is [coq/]).
-    The build script in [coq/Extracted/] copies the file into place
-    for the OCaml driver.
+    [coq/Extracted/build.sh] then copies them into
+    [ocaml/coq_driver/] alongside [main.ml] before invoking
+    [dune build] — the executable links against the [tzel] library
+    so the [Tzel.*] references in the realizations resolve.
 *)
 
 From Stdlib Require Extraction.
@@ -39,18 +46,23 @@ Extraction Language OCaml.
 Set Extraction Output Directory "Impl".
 
 (** Realize [Felt] as OCaml [bytes] (32-byte buffer), matching
-    [tzel/protocol/felt.ml] in the OCaml port. *)
+    [ocaml/protocol/felt.ml] in the OCaml port. *)
 Extract Constant Felt => "bytes".
 
-(** Placeholder hash: returns a fixed zero felt regardless of input.
-    Smoke-test only — extraction pipeline exercise. To be replaced
-    with [Tzel.Hash.hash3] once the differential driver lands. *)
-Extract Constant Hash3 => "(fun _ _ _ -> Bytes.make 32 '\000')".
+(** Realize [Hash3] as [Tzel.Hash.hash3] (BLAKE2s of [a || b || c],
+    truncated to 251 bits). The Cairo [hash3_generic] is bit-
+    equivalent to this under the cross-impl interop check; domain
+    separation comes from the ADRS-encoded second argument, not a
+    separate IV. *)
+Extract Constant Hash3 => "Tzel.Hash.hash3".
 
-(** Placeholder ADRS encoder: same idea, fixed output. Replaced
-    alongside [Hash3]. *)
+(** Realize [pack_adrs_chain] as [Tzel.Wots.pack_adrs] specialized
+    to the chain-step ADRS encoding: tag = [TAG_XMSS_CHAIN], plus
+    the trailing-zero slot. The three free indices are the only
+    ones the chain step actually varies over. *)
 Extract Constant pack_adrs_chain =>
-  "(fun _ _ _ -> Bytes.make 32 '\000')".
+  "(fun key_idx chain_idx step ->
+      Tzel.Wots.pack_adrs Tzel.Wots.tag_xmss_chain key_idx chain_idx step 0)".
 
 (** Map Coq [nat] to OCaml [int] so indices don't go through
     Peano-encoded linked lists — readable extracted code, fast
