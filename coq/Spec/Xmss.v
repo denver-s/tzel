@@ -123,6 +123,33 @@ Section LTree.
     Some (H_node 1 0 (H_node 0 0 a b) c).
   Proof. reflexivity. Qed.
 
+  (** [pair_nodes] is injective under per-slot CR of the node hash:
+      same output implies same input. *)
+  Lemma pair_nodes_injective :
+    node_injective H_node ->
+    forall nodes1 nodes2 level nidx,
+      length nodes1 = length nodes2 ->
+      pair_nodes nodes1 level nidx = pair_nodes nodes2 level nidx ->
+      nodes1 = nodes2.
+  Proof.
+    intro Hinj. intro nodes1.
+    pattern nodes1. apply pair_ind; clear nodes1.
+    - intros nodes2 level nidx Hlen Heq.
+      destruct nodes2; [reflexivity | discriminate].
+    - intros x nodes2 level nidx Hlen Heq.
+      destruct nodes2 as [| y [| z rest]]; simpl in *;
+        [discriminate | congruence | discriminate].
+    - intros a1 b1 rest1 IH nodes2 level nidx Hlen Heq.
+      destruct nodes2 as [| a2 [| b2 rest2]]; simpl in *;
+        [discriminate | discriminate |].
+      injection Heq as Hhash Hrest.
+      destruct (Hinj _ _ _ _ _ _ Hhash) as [Ha Hb].
+      f_equal; [exact Ha | f_equal; [exact Hb |]].
+      apply (IH rest2 level (S nidx)).
+      + congruence.
+      + exact Hrest.
+  Qed.
+
   (** [ltree_aux] succeeds on non-empty input when fuel is
       sufficient.  The fuel bound [length nodes <= S fuel] is mild:
       [ltree] uses [fuel := length nodes] which always satisfies it.
@@ -346,6 +373,57 @@ Section XmssVerify.
     - (* gen_pk sks <> nil when sks <> nil *)
       destruct sks; [contradiction | simpl; congruence].
     - rewrite Hleaf. apply Hauth. exact Hleaf.
+  Qed.
+
+  (** ** XMSS soundness (under CR + WOTS unforgeability)
+
+      The soundness direction: if [xmss_verify] holds, then the
+      signer knew a valid secret key for the leaf at [key_idx].
+
+      We factor this into two pieces:
+
+      1. [xmss_verify] implies a unique leaf is at [key_idx]
+         (from [auth_binding]).
+      2. The leaf came from L-tree compression of recovered
+         endpoints, which under WOTS unforgeability implies
+         knowledge of the secret key.
+
+      Piece (2) requires the WOTS+ one-time unforgeability axiom
+      from the literature (Hülsing et al. 2017).  We state it as
+      a hypothesis — axiomatizing it rather than proving it from
+      PRF/SPR, per the "light path" in STATUS.md. *)
+
+  (** Given that verification succeeds, the recovered leaf is
+      uniquely determined: any other leaf that verifies against
+      the same root at the same position must be equal (under CR
+      of the node hash). *)
+  Theorem xmss_verify_unique_leaf
+      (key_idx : nat)
+      (digits1 digits2 : list nat)
+      (sig1 sig2 : list Felt)
+      (auth_bits : list bool) (auth_siblings : list Felt)
+      (auth_root_val : Felt) :
+    node_injective H_node ->
+    length auth_bits = length auth_siblings ->
+    xmss_verify key_idx digits1 sig1 auth_bits auth_siblings auth_root_val ->
+    xmss_verify key_idx digits2 sig2 auth_bits auth_siblings auth_root_val ->
+    (* Both verify -> both recover the same leaf *)
+    forall leaf1 leaf2,
+      ltree H_node (recover_all F ADRS_chain pub_seed key_idx 0 digits1 sig1)
+        = Some leaf1 ->
+      ltree H_node (recover_all F ADRS_chain pub_seed key_idx 0 digits2 sig2)
+        = Some leaf2 ->
+      leaf1 = leaf2.
+  Proof.
+    intros Hinj Hpath Hv1 Hv2 leaf1 leaf2 Hl1 Hl2.
+    unfold xmss_verify in Hv1, Hv2.
+    rewrite Hl1 in Hv1. rewrite Hl2 in Hv2.
+    (* Both auth paths from different leaves reach the same root *)
+    exact (proj1 (Merkle.auth_binding H_node Hinj
+                    auth_bits auth_siblings auth_siblings
+                    leaf1 leaf2 key_idx 0
+                    Hpath Hpath
+                    (eq_trans Hv1 (eq_sym Hv2)))).
   Qed.
 
 End XmssVerify.

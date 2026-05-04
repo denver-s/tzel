@@ -50,6 +50,38 @@ Definition auth_depth : nat := 16.
 Definition tree_depth : nat := 48.
 
 (* ================================================================ *)
+(** ** Collision resistance                                           *)
+(* ================================================================ *)
+
+(** We model collision resistance as injectivity.  This is strictly
+    stronger than computational CR, but the proof obligations it
+    generates are identical — every step where the real proof would
+    say "unless a collision was found" becomes an appeal to this
+    hypothesis.  A collision-finding adversary in the computational
+    model corresponds to a witness that violates the axiom.
+
+    The [Spec]-layer soundness theorems take these as hypotheses
+    ([Section] variables); they are never globally axiomatized. *)
+
+Definition injective_2 (H : Felt -> Felt -> Felt) : Prop :=
+  forall a b c d, H a b = H c d -> a = c /\ b = d.
+
+Definition injective_4 (H : Felt -> Felt -> Felt -> Felt -> Felt) : Prop :=
+  forall a1 a2 a3 a4 b1 b2 b3 b4,
+    H a1 a2 a3 a4 = H b1 b2 b3 b4 ->
+    a1 = b1 /\ a2 = b2 /\ a3 = b3 /\ a4 = b4.
+
+(** Per-slot injectivity for the level/position-indexed node hash
+    used in auth trees and L-trees.  The hash is injective within
+    each (level, node_idx) slot; cross-slot collisions are prevented
+    by domain separation (different ADRS). *)
+Definition node_injective
+    (H_node : nat -> nat -> Felt -> Felt -> Felt) : Prop :=
+  forall level nidx a b c d,
+    H_node level nidx a b = H_node level nidx c d ->
+    a = c /\ b = d.
+
+(* ================================================================ *)
 (** ** Sighash fold                                                   *)
 (* ================================================================ *)
 

@@ -20,6 +20,7 @@
 
 From Stdlib Require Import List Bool Arith.
 From Common Require Import Felt.
+From Spec Require Import Hashes.
 
 (* ================================================================ *)
 (** ** Uniform-hash Merkle path (commitment tree)                    *)
@@ -164,3 +165,105 @@ Proof.
       merkle_root H bs ss (if b then H s leaf else H leaf s)).
     apply IH.
 Qed.
+
+(* ================================================================ *)
+(** ** Merkle binding (soundness under collision resistance)          *)
+(* ================================================================ *)
+
+(** If two Merkle path computations produce the same root using the
+    same position bits, then the leaves and all siblings must be
+    equal — under collision resistance of the hash.
+
+    This is the key soundness lemma for Merkle inclusion proofs:
+    it means a verified path uniquely determines the leaf at the
+    claimed position.  A cheating prover who submits a different
+    leaf would need to find a hash collision. *)
+
+Section MerkleBinding.
+
+  Variable H : Felt -> Felt -> Felt.
+  Hypothesis H_inj : injective_2 H.
+
+  Theorem merkle_binding
+      (bits : list bool)
+      (sibs1 sibs2 : list Felt)
+      (leaf1 leaf2 : Felt) :
+    length bits = length sibs1 ->
+    length bits = length sibs2 ->
+    merkle_root H bits sibs1 leaf1 = merkle_root H bits sibs2 leaf2 ->
+    leaf1 = leaf2 /\ sibs1 = sibs2.
+  Proof.
+    revert sibs1 sibs2 leaf1 leaf2.
+    induction bits as [| b bs IH];
+      intros sibs1 sibs2 leaf1 leaf2 Hlen1 Hlen2 Heq.
+    - (* Empty path: leaves are directly equal *)
+      destruct sibs1; [| discriminate].
+      destruct sibs2; [| discriminate].
+      simpl in Heq. split; [exact Heq | reflexivity].
+    - (* Inductive step *)
+      destruct sibs1 as [| s1 ss1]; [discriminate |].
+      destruct sibs2 as [| s2 ss2]; [discriminate |].
+      simpl in Heq, Hlen1, Hlen2.
+      assert (Hlen1' : length bs = length ss1) by congruence.
+      assert (Hlen2' : length bs = length ss2) by congruence.
+      (* IH gives us: merkle_step values match, tails match *)
+      destruct (IH ss1 ss2 (merkle_step H b leaf1 s1)
+                   (merkle_step H b leaf2 s2)
+                   Hlen1' Hlen2' Heq) as [Hstep Hss].
+      (* Crack open merkle_step with CR *)
+      unfold merkle_step in Hstep; destruct b.
+      + (* right child: H s1 leaf1 = H s2 leaf2 *)
+        destruct (H_inj _ _ _ _ Hstep) as [Hs Hl].
+        split; [exact Hl | congruence].
+      + (* left child: H leaf1 s1 = H leaf2 s2 *)
+        destruct (H_inj _ _ _ _ Hstep) as [Hl Hs].
+        split; [exact Hl | congruence].
+  Qed.
+
+End MerkleBinding.
+
+(** Auth-tree binding: same result under same starting index
+    implies same leaf and siblings, under per-slot injectivity
+    of the node hash. *)
+
+Section AuthBinding.
+
+  Variable H_node : nat -> nat -> Felt -> Felt -> Felt.
+  Hypothesis H_node_inj : node_injective H_node.
+
+  Theorem auth_binding
+      (bits : list bool)
+      (sibs1 sibs2 : list Felt)
+      (leaf1 leaf2 : Felt)
+      (idx level : nat) :
+    length bits = length sibs1 ->
+    length bits = length sibs2 ->
+    auth_root H_node bits sibs1 leaf1 idx level =
+    auth_root H_node bits sibs2 leaf2 idx level ->
+    leaf1 = leaf2 /\ sibs1 = sibs2.
+  Proof.
+    revert sibs1 sibs2 leaf1 leaf2 idx level.
+    induction bits as [| b bs IH];
+      intros sibs1 sibs2 leaf1 leaf2 idx level Hlen1 Hlen2 Heq.
+    - destruct sibs1; [| discriminate].
+      destruct sibs2; [| discriminate].
+      simpl in Heq. split; [exact Heq | reflexivity].
+    - destruct sibs1 as [| s1 ss1]; [discriminate |].
+      destruct sibs2 as [| s2 ss2]; [discriminate |].
+      simpl in Heq, Hlen1, Hlen2.
+      assert (Hlen1' : length bs = length ss1) by congruence.
+      assert (Hlen2' : length bs = length ss2) by congruence.
+      set (v1 := if b then H_node level (idx / 2) s1 leaf1
+                       else H_node level (idx / 2) leaf1 s1) in *.
+      set (v2 := if b then H_node level (idx / 2) s2 leaf2
+                       else H_node level (idx / 2) leaf2 s2) in *.
+      destruct (IH ss1 ss2 v1 v2 (idx / 2) (S level)
+                   Hlen1' Hlen2' Heq) as [Hstep Hss].
+      subst v1 v2; destruct b.
+      + destruct (H_node_inj _ _ _ _ _ _ Hstep) as [Hs Hl].
+        split; [exact Hl | congruence].
+      + destruct (H_node_inj _ _ _ _ _ _ Hstep) as [Hl Hs].
+        split; [exact Hl | congruence].
+  Qed.
+
+End AuthBinding.
