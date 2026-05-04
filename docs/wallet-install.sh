@@ -2,7 +2,8 @@
 # tzel-wallet installer.
 #
 # Pulls one Docker image (nginx + daemon + tzel CLI + UI) and runs it
-# on http://127.0.0.1:8080. nginx serves the UI and proxies /api/* to the
+# on http://127.0.0.1:${HOST_PORT} (default 8080; configurable via
+# TZEL_WALLET_HOST_PORT). nginx serves the UI and proxies /api/* to the
 # daemon on the same container. Self-custodial: keys live in
 # $HOME/.tzel-wallet on this machine.
 #
