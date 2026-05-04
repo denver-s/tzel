@@ -119,4 +119,33 @@ Section ChainStep.
       reflexivity.
   Qed.
 
+  (** WOTS+ chain recovery.
+
+      During verification, a signature element has been chained
+      forward [d] steps from the secret key:
+        [sig_elem = iter d sk pub_seed key_idx chain_idx 0]
+
+      Recovery extends the chain by [total_steps - d] more steps to
+      reconstruct the public key endpoint.  This theorem states that
+      the recovery produces the same result as chaining [total_steps]
+      from the secret key directly.
+
+      In the protocol, [total_steps = w − 1 = 3] and
+      [d ∈ {0, 1, 2, 3}].  Proof follows from [iter_compose]. *)
+  Theorem recover_correct
+          (total_steps d : nat) (sk pub_seed : Felt)
+          (key_idx chain_idx : nat) :
+    d <= total_steps ->
+    iter (total_steps - d)
+         (iter d sk pub_seed key_idx chain_idx 0)
+         pub_seed key_idx chain_idx d =
+    iter total_steps sk pub_seed key_idx chain_idx 0.
+  Proof.
+    intros Hle.
+    rewrite <- iter_compose.
+    rewrite (Nat.add_comm d (total_steps - d)).
+    rewrite (Nat.sub_add d total_steps Hle).
+    reflexivity.
+  Qed.
+
 End ChainStep.

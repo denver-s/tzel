@@ -48,23 +48,47 @@ Strict requirement: **no `admit` anywhere**. Every theorem closes.
   iteration, with the step counter incrementing). Parameterized
   over the hash and the address encoding. Whitepaper-derived; does
   *not* look at the Cairo. Definitions only — proofs land next.
-- **`Spec/Hashes.v` / `Spec/Merkle.v` / `Spec/Xmss.v` /
-  `Spec/Transfer.v` / `Spec/Shield.v` / `Spec/Unshield.v`:** stubs
+- **`Spec/Hashes.v`:** protocol constants (`wots_w = 4`,
+  `wots_chain_len = 3`, `wots_chains = 133`, `auth_depth = 16`,
+  `tree_depth = 48`) and hash-family documentation.
+- **`Spec/Merkle.v`:** abstract Merkle path verification (two
+  variants). `merkle_root` for the commitment tree (uniform hash);
+  `auth_root` for the XMSS auth tree (level/position-indexed hash).
+  Proved: `merkle_root_nil`, `merkle_root_cons`, `merkle_root_app`
+  (path composition — the Merkle analogue of `iter_compose`),
+  `merkle_root_snoc`, `auth_root_nil`, `auth_root_cons`.
+- **`Spec/Xmss.v`:** L-tree compression and XMSS verifier skeleton.
+  `pair_nodes` (structurally recursive pairwise compression),
+  `pair_nodes_length_le` (monotonicity proof), `ltree_aux` /
+  `ltree` (fuel-bounded iteration), `ltree_singleton` and
+  `ltree_pair` proved.  `recover_endpoint` / `recover_all` (WOTS+
+  pubkey recovery using `Wots.iter`), `recover_endpoint_correct`
+  (recovery is correct — corollary of `Wots.recover_correct`).
+  `xmss_verify` predicate combining recovery → L-tree → auth path.
+- **`Spec/Transfer.v` / `Spec/Shield.v` / `Spec/Unshield.v`:** stubs
   with intent docs explaining what each will model.
 - **`Impl/Common.v`:** placeholder for impl-side shared declarations.
-- **`Impl/Hashes.v`:** declares `Hash3` parameter (concrete, will be
-  realized at extraction).
+- **`Impl/Hashes.v`:** declares `Hash3` and `Hash4` parameters
+  (concrete, will be realized at extraction).
 - **`Impl/Wots.v`:** mirrors Cairo `xmss_chain_step` as a one-line
   Coq function. Contains an `pack_adrs_chain` parameter for the
-  ADRS encoding. Refinement theorem to `Spec.Wots.step` is intended
-  but not written yet.
-- **`Impl/{Merkle,Xmss,Transfer,Shield,Unshield}.v`:** stubs with
-  intent docs and updated imports (`From Common Require Import
-  Felt`, etc.).
-- **`Spec/Wots.v` chain-step lemmas:** `iter_succ` and
-  `iter_compose` proved (induction on `n` with `Nat.add_succ_r` /
-  `Nat.add_0_r`). Foundation for upcoming L-tree and full-XMSS
-  proofs.
+  ADRS encoding. Refinement theorem `refines_spec` closes by
+  `reflexivity`.
+- **`Impl/Merkle.v`:** instantiates `Spec.Merkle` with concrete
+  hash parameters.  `merkle_compute_root` for the commitment tree
+  (via `Hash2_merkle`), `auth_compute_root` for the auth tree (via
+  `Hash4` + `pack_adrs_tree`).  Refinement theorems close by
+  `reflexivity`.
+- **`Impl/Xmss.v`:** instantiates `Spec.Xmss` L-tree and recovery
+  with concrete hash parameters (`Hash4` + `pack_adrs_ltree`,
+  `Hash3` + `pack_adrs_chain`).  Soundness proofs pending.
+- **`Impl/{Transfer,Shield,Unshield}.v`:** stubs with intent docs.
+- **`Spec/Wots.v` chain-step lemmas:** `iter_succ`,
+  `iter_compose`, and `recover_correct` proved.  `recover_correct`
+  states that chaining a signature element forward by the remaining
+  steps recovers the public key endpoint — follows directly from
+  `iter_compose` and arithmetic.  Foundation for XMSS verifier
+  soundness.
 - **`Impl/Wots.v` refinement:** `Theorem refines_spec` closes by
   `reflexivity` — `xmss_chain_step` equals `Spec.Wots.step` under
   the realized `Hash3` / `pack_adrs_chain`. Future Spec-level
