@@ -115,6 +115,26 @@ Section LTree.
     ltree (a :: b :: nil) = Some (H_node 0 0 a b).
   Proof. reflexivity. Qed.
 
+  (** [pair_nodes] output length depends only on input length,
+      not on the values or hash parameters.  Needed for the
+      [ltree_injective] proof. *)
+  Lemma pair_nodes_same_length : forall nodes1 nodes2 level nidx,
+    length nodes1 = length nodes2 ->
+    length (pair_nodes nodes1 level nidx) =
+    length (pair_nodes nodes2 level nidx).
+  Proof.
+    intro nodes1. pattern nodes1. apply pair_ind; clear nodes1.
+    - intros nodes2 level nidx Hlen.
+      destruct nodes2; [reflexivity | discriminate].
+    - intros x nodes2 level nidx Hlen.
+      destruct nodes2 as [| y [| z rest2]];
+        [discriminate | reflexivity | simpl in Hlen; discriminate].
+    - intros a b rest1 IH nodes2 level nidx Hlen.
+      destruct nodes2 as [| c [| d rest2]];
+        [discriminate | simpl in Hlen; discriminate |].
+      simpl. f_equal. apply IH. simpl in Hlen. congruence.
+  Qed.
+
   (** Triple: exercises the odd-element carry.  The last element
       [c] is unpaired at level 0, then paired with the hash of
       [(a, b)] at level 1. *)
@@ -186,6 +206,64 @@ Section LTree.
   Proof.
     intro Hne. unfold ltree.
     apply ltree_aux_succeeds; [exact Hne | lia].
+  Qed.
+
+  (** [ltree_aux] is injective under CR: same output on equal-length
+      inputs implies the inputs are equal. *)
+  Lemma ltree_aux_injective :
+    node_injective H_node ->
+    forall fuel nodes1 nodes2 level,
+      length nodes1 = length nodes2 ->
+      ltree_aux fuel nodes1 level = ltree_aux fuel nodes2 level ->
+      ltree_aux fuel nodes1 level <> None ->
+      nodes1 = nodes2.
+  Proof.
+    intro Hinj.
+    induction fuel as [| f IH]; intros nodes1 nodes2 level Hlen Heq Hne.
+    - (* fuel = 0 *)
+      destruct nodes1 as [| x1 [| y1 rest1]].
+      + exfalso. apply Hne. reflexivity.
+      + destruct nodes2 as [| x2 [| y2 rest2]];
+          [discriminate | simpl in Heq; congruence
+          | simpl in Hlen; discriminate].
+      + exfalso. apply Hne. reflexivity.
+    - (* fuel = S f *)
+      destruct nodes1 as [| x1 [| y1 rest1]].
+      + exfalso. apply Hne. reflexivity.
+      + destruct nodes2 as [| x2 [| y2 rest2]];
+          [discriminate | simpl in Heq; congruence
+          | simpl in Hlen; discriminate].
+      + destruct nodes2 as [| x2 [| y2 rest2]];
+          [simpl in Hlen; discriminate
+          | simpl in Hlen; discriminate |].
+        change (ltree_aux f (pair_nodes (x1 :: y1 :: rest1) level 0) (S level) =
+                ltree_aux f (pair_nodes (x2 :: y2 :: rest2) level 0) (S level))
+          in Heq.
+        change (ltree_aux f (pair_nodes (x1 :: y1 :: rest1) level 0) (S level) <> None)
+          in Hne.
+        apply (pair_nodes_injective Hinj _ _ level 0);
+          [exact Hlen |].
+        apply (IH _ _ (S level)).
+        * apply pair_nodes_same_length. exact Hlen.
+        * exact Heq.
+        * exact Hne.
+  Qed.
+
+  (** L-tree is injective under CR: same output on equal-length
+      non-empty inputs implies the inputs are pointwise equal. *)
+  Theorem ltree_injective :
+    node_injective H_node ->
+    forall nodes1 nodes2,
+      length nodes1 = length nodes2 ->
+      ltree nodes1 = ltree nodes2 ->
+      ltree nodes1 <> None ->
+      nodes1 = nodes2.
+  Proof.
+    intros Hinj nodes1 nodes2 Hlen Heq Hne.
+    unfold ltree in *.
+    rewrite <- Hlen in Heq.
+    apply (ltree_aux_injective Hinj (length nodes1) nodes1 nodes2 0
+             Hlen Heq Hne).
   Qed.
 
 End LTree.
@@ -427,6 +505,71 @@ Section XmssVerify.
   Qed.
 
 End XmssVerify.
+
+(* ================================================================ *)
+(** ** XMSS soundness: assembled from binding + unforgeability       *)
+(* ================================================================ *)
+
+(** The full XMSS soundness theorem: if two signatures both verify
+    against the same auth root and key index, and both produce
+    non-empty endpoint lists of equal length, then:
+
+    (a) They recover the same L-tree leaf (from [auth_binding]).
+    (b) They recover the same WOTS+ endpoints (from [ltree_injective]).
+
+    The final step — "same endpoints implies same secret key" — is
+    the WOTS+ one-time unforgeability property from Hülsing et al.
+    We don't prove it; it would require a game-based reduction to
+    PRF/second-preimage-resistance of BLAKE2s.  Instead, we
+    establish the mechanical fact that XMSS soundness reduces to
+    WOTS+ unforgeability: any break of XMSS implies a break of
+    WOTS+. *)
+
+Theorem xmss_soundness_reduces_to_wots
+    (F : Felt -> Felt -> Felt -> Felt)
+    (ADRS_chain : nat -> nat -> nat -> Felt)
+    (H_node : nat -> nat -> Felt -> Felt -> Felt)
+    (pub_seed : Felt)
+    (key_idx : nat)
+    (digits1 digits2 : list nat) (sig1 sig2 : list Felt)
+    (auth_bits : list bool) (auth_siblings : list Felt)
+    (auth_root_val : Felt) :
+  node_injective H_node ->
+  length auth_bits = length auth_siblings ->
+  (* Both signatures verify *)
+  xmss_verify F ADRS_chain H_node pub_seed
+    key_idx digits1 sig1 auth_bits auth_siblings auth_root_val ->
+  xmss_verify F ADRS_chain H_node pub_seed
+    key_idx digits2 sig2 auth_bits auth_siblings auth_root_val ->
+  (* Both produce endpoint lists of equal length *)
+  length (recover_all F ADRS_chain pub_seed key_idx 0 digits1 sig1) =
+  length (recover_all F ADRS_chain pub_seed key_idx 0 digits2 sig2) ->
+  (* Then: the recovered WOTS+ endpoints are identical *)
+  recover_all F ADRS_chain pub_seed key_idx 0 digits1 sig1 =
+  recover_all F ADRS_chain pub_seed key_idx 0 digits2 sig2.
+Proof.
+  intros Hinj Hpath Hv1 Hv2 Hreclen.
+  unfold xmss_verify in Hv1, Hv2.
+  set (eps1 := recover_all F ADRS_chain pub_seed key_idx 0 digits1 sig1) in *.
+  set (eps2 := recover_all F ADRS_chain pub_seed key_idx 0 digits2 sig2) in *.
+  (* Case-split on L-tree results; rewrite into hypotheses *)
+  destruct (ltree H_node eps1) as [leaf1 |] eqn:Hl1;
+    rewrite ?Hl1 in Hv1; simpl in Hv1; [| contradiction].
+  destruct (ltree H_node eps2) as [leaf2 |] eqn:Hl2;
+    rewrite ?Hl2 in Hv2; simpl in Hv2; [| contradiction].
+  (* Auth binding: same root at same position -> same leaf *)
+  assert (Hleaf : leaf1 = leaf2).
+  { exact (proj1 (Merkle.auth_binding H_node Hinj
+                    auth_bits auth_siblings auth_siblings
+                    leaf1 leaf2 key_idx 0
+                    Hpath Hpath
+                    (eq_trans Hv1 (eq_sym Hv2)))). }
+  subst leaf2.
+  (* L-tree injective: same leaf -> same endpoints *)
+  apply (ltree_injective H_node Hinj eps1 eps2 Hreclen).
+  - rewrite Hl1, Hl2. reflexivity.
+  - rewrite Hl1. discriminate.
+Qed.
 
 (* ================================================================ *)
 (** ** Bit decomposition and nat-based auth-tree walk                *)
