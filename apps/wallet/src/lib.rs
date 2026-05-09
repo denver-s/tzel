@@ -3101,7 +3101,7 @@ fn run(cli: Cli) -> Result<(), String> {
         proving_service_url: None,
     };
     match cli.cmd {
-        Cmd::Keygen => cmd_keygen(&cli.wallet),
+        Cmd::Keygen => cmd_keygen(&cli.wallet, None),
         Cmd::Address => cmd_address(&cli.wallet),
         Cmd::ExportDetect { out } => cmd_export_detect(&cli.wallet, out.as_deref()),
         Cmd::ExportView { out } => cmd_export_view(&cli.wallet, out.as_deref()),
@@ -3377,7 +3377,43 @@ macro_rules! user_out {
 #[derive(Subcommand)]
 enum UserCmd {
     /// Create a new wallet file.
-    Init,
+    Init {
+        /// Initialise `wallet.json.scanned` to this rollup commitment-tree
+        /// size instead of 0.
+        ///
+        /// **Precondition (load-bearing):** the `master_sk` written by this
+        /// `cmd_init` invocation is freshly sampled — see `random_felt()`
+        /// in `cmd_keygen`. No external party can have encrypted a note
+        /// to a payment address derived from a `master_sk` that did not
+        /// exist when the corresponding commitment was published, so
+        /// commits in `[0..tree_size_at_init)` are guaranteed empty for
+        /// this wallet and the historical scan can be skipped. On a
+        /// long-running rollup that's 5–10 min wallclock saved on the
+        /// first sync (which currently holds the wallet flock and
+        /// blocks every other wallet operation through the daemon).
+        ///
+        /// **Do NOT pass this flag from a key-import path** (a future
+        /// feature where the caller seeds `master_sk` from an existing
+        /// key rather than sampling a fresh one). For an imported key
+        /// notes minted in `[0..N)` to that key DO exist on the rollup
+        /// and would be silently skipped — recoverable only by re-init
+        /// at `scanned = 0`. The CLI cannot enforce this precondition
+        /// (`master_sk` randomness is unobservable post-write); the
+        /// caller is responsible.
+        ///
+        /// The CLI itself stays rollup-agnostic — it does no network
+        /// I/O. The caller (e.g. the wallet daemon) is responsible for
+        /// querying the rollup-node's
+        /// `/global/state/values/tzel/v1/state/tree/size` and threading
+        /// the value here.
+        ///
+        /// Omitting the flag preserves the legacy behaviour
+        /// (`scanned = 0`) — useful when rollup-rpc is unavailable at
+        /// init time, or when the wallet should surface every
+        /// historical note for any reason.
+        #[arg(long, value_name = "N")]
+        at_tree_size: Option<u64>,
+    },
     /// Manage the saved network profile for this wallet.
     Profile {
         #[command(subcommand)]
@@ -3676,7 +3712,7 @@ async fn detect_service_post_sync(
 
 fn run_user(cli: UserCli) -> Result<(), String> {
     let _wallet_lock = match &cli.cmd {
-        UserCmd::Init
+        UserCmd::Init { .. }
         | UserCmd::Receive
         | UserCmd::Sync { .. }
         | UserCmd::Deposit { .. }
@@ -3717,7 +3753,7 @@ fn run_user(cli: UserCli) -> Result<(), String> {
     // Name of the subcommand — used as the `command` field of the JSON
     // envelope emitted at end-of-run when --json is set.
     let command_name: &'static str = match &cli.cmd {
-        UserCmd::Init => "init",
+        UserCmd::Init { .. } => "init",
         UserCmd::Profile { .. } => "profile",
         UserCmd::Receive => "receive",
         UserCmd::Addresses => "addresses",
@@ -3737,7 +3773,7 @@ fn run_user(cli: UserCli) -> Result<(), String> {
     };
 
     let outcome: Result<(), String> = match cli.cmd {
-        UserCmd::Init => cmd_keygen(&cli.wallet),
+        UserCmd::Init { at_tree_size } => cmd_keygen(&cli.wallet, at_tree_size),
         UserCmd::Profile { cmd } => run_user_profile(&cli.wallet, cmd),
         UserCmd::Receive => cmd_address(&cli.wallet),
         UserCmd::Addresses => cmd_addresses(&cli.wallet),
@@ -4383,18 +4419,30 @@ fn persist_wallet_and_make_proof(
 // Commands
 // ═══════════════════════════════════════════════════════════════════════
 
-fn cmd_keygen(path: &str) -> Result<(), String> {
+fn cmd_keygen(path: &str, at_tree_size: Option<u64>) -> Result<(), String> {
     if std::path::Path::new(path).exists() {
         return Err(format!("{} already exists", path));
     }
     let master_sk = random_felt();
+
+    // `at_tree_size` lets the caller skip the historical-commit scan
+    // a fresh wallet would otherwise pay on its first sync. A wallet
+    // created at tree_size=N has, by definition, received no notes in
+    // commits [0..N), so trial-decrypting them is wasted work
+    // (5–10 min wallclock on a long-running rollup, while holding
+    // the wallet flock). Set `scanned = N` and the first sync only
+    // covers [N..current_tree_size). The usize cast is bounded by the
+    // commitment-tree depth (currently 2^32-class, fits in usize).
+    let scanned = at_tree_size
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+        .unwrap_or(0);
 
     let w = WalletFile {
         master_sk,
         addresses: vec![],
         addr_counter: 0,
         notes: vec![],
-        scanned: 0,
+        scanned,
         wots_key_indices: std::collections::HashMap::new(),
         pending_spends: vec![],
         pending_deposits: vec![],
@@ -4406,8 +4454,9 @@ fn cmd_keygen(path: &str) -> Result<(), String> {
         json: {
             "created" => true,
             "path" => path,
+            "scanned" => scanned,
         },
-        human: "Wallet created: {}", path
+        human: "Wallet created: {} (scanned cursor: {})", path, scanned
     );
     Ok(())
 }
@@ -11219,4 +11268,64 @@ mod network_profile_tests {
     #[test]
     #[ignore = "TODO: re-implement on pool model — head-pinning is now structural, but black-box mock surface is large"]
     fn cmd_shield_rollup_pins_fee_and_balance_reads_to_same_head() {}
+
+    /// `cmd_keygen` without `at_tree_size` preserves the legacy default
+    /// (`scanned = 0`) so existing callers that don't yet pass the
+    /// new flag aren't surprised. Locks the back-compat contract.
+    #[test]
+    fn cmd_keygen_defaults_scanned_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let path_str = path.to_str().unwrap();
+        cmd_keygen(path_str, None).expect("init succeeds");
+        let w = load_wallet(path_str).expect("load created wallet");
+        assert_eq!(w.scanned, 0);
+    }
+
+    /// `at_tree_size = Some(0)` must be equivalent to `None` — both
+    /// produce `scanned = 0`. Locks the boundary so a future rewrite
+    /// that special-cases `Some(0)` differently (e.g. interprets it
+    /// as "skip everything", which would be a u64 → usize sign-change
+    /// footgun) breaks loudly.
+    #[test]
+    fn cmd_keygen_at_tree_size_zero_equals_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let path_str = path.to_str().unwrap();
+        cmd_keygen(path_str, Some(0)).expect("init succeeds");
+        let w = load_wallet(path_str).expect("load created wallet");
+        assert_eq!(w.scanned, 0);
+    }
+
+    /// `cmd_keygen` with `at_tree_size = N` writes `scanned = N` so
+    /// the first sync only covers `[N..current_tree_size)` rather
+    /// than `[0..current_tree_size)`. This is the load-bearing
+    /// "skip historical scan" property: a brand-new wallet has
+    /// received no notes prior to its creation, so the historical
+    /// commits are guaranteed empty for it. On a long-running
+    /// network this drops the first-sync wallclock from minutes
+    /// to seconds.
+    #[test]
+    fn cmd_keygen_with_at_tree_size_initialises_scanned_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let path_str = path.to_str().unwrap();
+        cmd_keygen(path_str, Some(67_890)).expect("init succeeds");
+        let w = load_wallet(path_str).expect("load created wallet");
+        assert_eq!(w.scanned, 67_890);
+    }
+
+    /// Refuses to clobber an existing wallet file regardless of
+    /// `at_tree_size` — the flag must not become an accidental reset
+    /// path. Symmetric with the existing legacy-default behaviour.
+    #[test]
+    fn cmd_keygen_refuses_to_overwrite_existing_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let path_str = path.to_str().unwrap();
+        cmd_keygen(path_str, None).expect("first init");
+        let err = cmd_keygen(path_str, Some(123))
+            .expect_err("second init must refuse");
+        assert!(err.contains("already exists"), "got: {err}");
+    }
 }
