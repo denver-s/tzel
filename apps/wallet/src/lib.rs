@@ -8624,6 +8624,8 @@ fn cmd_shield_rollup(
         &note_producer.cm,
         &note_recipient.mh,
         &note_producer.mh,
+        &ASSET_TEZ,
+        &ASSET_TEZ,
     );
 
     let ask_j = derive_ask(&w.account().ask_base, address_index);

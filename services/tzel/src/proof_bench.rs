@@ -138,10 +138,13 @@ pub fn build_shield_bench_witness() -> BenchWitness {
         &cm_producer,
         &mh_recipient,
         &mh_producer,
+        &ASSET_TEZ,
+        &ASSET_TEZ,
     );
     let (sig, _, _) = wots_sign(&ask_j, 0, &sighash);
 
-    let total_fields = 16 + WOTS_CHAINS + AUTH_DEPTH + 5;
+    // +2 for asset_new and asset_producer.
+    let total_fields = 16 + WOTS_CHAINS + AUTH_DEPTH + 5 + 2;
     let mut args = Vec::with_capacity(total_fields + 1);
     args.push(felt_u64_to_hex(total_fields as u64));
     args.push(felt_to_hex(&auth_domain));
@@ -171,6 +174,10 @@ pub fn build_shield_bench_witness() -> BenchWitness {
     args.push(felt_to_hex(&producer_nk_tag));
     args.push(felt_to_hex(&producer_d_j));
     args.push(felt_to_hex(&producer_rseed));
+    // Multiasset Phase B: shield outputs pinned to tez (v1 single bridge,
+    // and producer fee always tez).
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_new
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_producer
 
     let expected_public_outputs = vec![
         auth_domain,

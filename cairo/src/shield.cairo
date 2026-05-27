@@ -59,15 +59,29 @@ pub fn verify(
     producer_nk_tag: felt252,
     producer_d_j: felt252,
     producer_rseed: felt252,
+    // Multiasset (Phase B). asset_new is the recipient note's asset
+    // (pinned to ASSET_TEZ in v1 — the only deployed bridge);
+    // asset_producer is the producer-fee note's asset (always
+    // ASSET_TEZ regardless of bridges, by the liquidity argument).
+    // Both are public side-bound via the sighash because the
+    // L1 ticket reveals the asset anyway.
+    asset_new: felt252,
+    asset_producer: felt252,
 ) -> Array<felt252> {
     assert(wots_sig_flat.len() == xmss_common::WOTS_CHAINS, 'shield: wots sig len');
     assert(auth_siblings_flat.len() == merkle::AUTH_DEPTH, 'shield: auth sib len');
+
+    // v1 single-bridge constraint: shield only accepts tez deposits.
+    // Lift to a per-bridge whitelist when other bridges land.
+    assert(asset_new == ASSET_TEZ, 'shield: v1 tez only');
+    // Permanent constraint: DAL slot publisher fee must be tez.
+    assert(asset_producer == ASSET_TEZ, 'shield: producer must be tez');
 
     // Recipient commitment.
     let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
     let rcm = hash::derive_rcm(rseed);
     assert(
-        hash::commit(d_j, v_note, ASSET_TEZ, rcm, otag) == cm_new,
+        hash::commit(d_j, v_note, asset_new, rcm, otag) == cm_new,
         'shield: bad commitment',
     );
 
@@ -76,7 +90,7 @@ pub fn verify(
         hash::owner_tag(producer_auth_root, producer_auth_pub_seed, producer_nk_tag);
     let producer_rcm = hash::derive_rcm(producer_rseed);
     assert(
-        hash::commit(producer_d_j, producer_fee, ASSET_TEZ, producer_rcm, producer_otag)
+        hash::commit(producer_d_j, producer_fee, asset_producer, producer_rcm, producer_otag)
             == cm_producer,
         'shield: bad producer cm',
     );
@@ -90,13 +104,17 @@ pub fn verify(
     assert(pkh == pubkey_hash, 'shield: bad pubkey_hash');
 
     // sighash = fold(0x03, auth_domain, pubkey_hash, v_note, fee,
-    //                producer_fee, cm_new, cm_producer, memo_ct_hash,
-    //                producer_memo_ct_hash).
+    //                producer_fee, asset_new, asset_producer, cm_new,
+    //                cm_producer, memo_ct_hash, producer_memo_ct_hash).
+    // The asset fields are included because they are public at the
+    // L1 bridge boundary.
     let mut sighash = hash::sighash_fold(0x03, auth_domain);
     sighash = hash::sighash_fold(sighash, pubkey_hash);
     sighash = hash::sighash_fold(sighash, v_note.into());
     sighash = hash::sighash_fold(sighash, fee.into());
     sighash = hash::sighash_fold(sighash, producer_fee.into());
+    sighash = hash::sighash_fold(sighash, asset_new);
+    sighash = hash::sighash_fold(sighash, asset_producer);
     sighash = hash::sighash_fold(sighash, cm_new);
     sighash = hash::sighash_fold(sighash, cm_producer);
     sighash = hash::sighash_fold(sighash, memo_ct_hash);
@@ -164,6 +182,9 @@ mod tests {
         producer_nk_tag: felt252,
         producer_d_j: felt252,
         producer_rseed: felt252,
+        // Multiasset Phase B
+        asset_new: felt252,
+        asset_producer: felt252,
     }
 
     fn copy_and_mutate(values: Span<felt252>, target: u32) -> Array<felt252> {
@@ -248,12 +269,16 @@ mod tests {
         cm_producer: felt252,
         memo_ct_hash: felt252,
         producer_memo_ct_hash: felt252,
+        asset_new: felt252,
+        asset_producer: felt252,
     ) -> felt252 {
         let mut sighash = hash::sighash_fold(0x03, auth_domain);
         sighash = hash::sighash_fold(sighash, pubkey_hash);
         sighash = hash::sighash_fold(sighash, v_note.into());
         sighash = hash::sighash_fold(sighash, fee.into());
         sighash = hash::sighash_fold(sighash, producer_fee.into());
+        sighash = hash::sighash_fold(sighash, asset_new);
+        sighash = hash::sighash_fold(sighash, asset_producer);
         sighash = hash::sighash_fold(sighash, cm_new);
         sighash = hash::sighash_fold(sighash, cm_producer);
         sighash = hash::sighash_fold(sighash, memo_ct_hash);
@@ -356,6 +381,8 @@ mod tests {
             cm_producer,
             memo_ct_hash,
             producer_memo_ct_hash,
+            ASSET_TEZ,
+            ASSET_TEZ,
         );
         let wots_sig = sign_shield(sighash, auth_pub_seed, auth_idx, 0xC100);
 
@@ -383,6 +410,8 @@ mod tests {
             producer_nk_tag,
             producer_d_j,
             producer_rseed,
+            asset_new: ASSET_TEZ,
+            asset_producer: ASSET_TEZ,
         }
     }
 
@@ -415,6 +444,8 @@ mod tests {
             f.producer_nk_tag,
             f.producer_d_j,
             f.producer_rseed,
+            f.asset_new,
+            f.asset_producer,
         )
     }
 
@@ -559,6 +590,8 @@ mod tests {
                     fixture.cm_producer,
                     fixture.memo_ct_hash,
                     fixture.producer_memo_ct_hash,
+                    fixture.asset_new,
+                    fixture.asset_producer,
                 ),
                 fixture.auth_pub_seed,
                 fixture.auth_idx,
@@ -682,6 +715,8 @@ mod tests {
             fixture.producer_nk_tag,
             fixture.producer_d_j,
             fixture.producer_rseed,
+            fixture.asset_new,
+            fixture.asset_producer,
         );
     }
 
@@ -719,6 +754,8 @@ mod tests {
             fixture.producer_nk_tag,
             fixture.producer_d_j,
             fixture.producer_rseed,
+            fixture.asset_new,
+            fixture.asset_producer,
         );
     }
 }

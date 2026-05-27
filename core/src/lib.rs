@@ -281,6 +281,8 @@ pub fn shield_sighash(
     cm_producer: &F,
     memo_ct_hash_recipient: &F,
     memo_ct_hash_producer: &F,
+    asset_recipient: &F,
+    asset_producer: &F,
 ) -> F {
     let mut type_tag = ZERO;
     type_tag[0] = 0x03;
@@ -289,6 +291,8 @@ pub fn shield_sighash(
     h = sighash_fold(&h, &u64_to_felt(v));
     h = sighash_fold(&h, &u64_to_felt(fee));
     h = sighash_fold(&h, &u64_to_felt(producer_fee));
+    h = sighash_fold(&h, asset_recipient);
+    h = sighash_fold(&h, asset_producer);
     h = sighash_fold(&h, cm_recipient);
     h = sighash_fold(&h, cm_producer);
     h = sighash_fold(&h, memo_ct_hash_recipient);
@@ -3519,6 +3523,8 @@ mod tests {
             &cm_producer,
             &mh_recipient,
             &mh_producer,
+            &ASSET_TEZ,
+            &ASSET_TEZ
         );
 
         let perturbations: Vec<F> = vec![
@@ -3532,6 +3538,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3543,6 +3551,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3554,6 +3564,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3565,6 +3577,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3576,6 +3590,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3587,6 +3603,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3598,6 +3616,8 @@ mod tests {
                 &u(99),
                 &mh_recipient,
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3609,6 +3629,8 @@ mod tests {
                 &cm_producer,
                 &u(99),
                 &mh_producer,
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
             shield_sighash(
                 &auth_domain,
@@ -3620,6 +3642,8 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &u(99),
+                &ASSET_TEZ,
+                &ASSET_TEZ
             ),
         ];
         for (idx, perturbed) in perturbations.iter().enumerate() {

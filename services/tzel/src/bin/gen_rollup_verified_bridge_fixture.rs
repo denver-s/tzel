@@ -362,10 +362,12 @@ fn generate_shield_proof(
         &producer_cm,
         &mh,
         &producer_mh,
+        &ASSET_TEZ,
+        &ASSET_TEZ,
     );
     let (sig, _, _) = wots_sign(&recipient.ask_j, auth_idx, &sighash);
 
-    let total_fields = 16 + WOTS_CHAINS + AUTH_DEPTH + 5;
+    let total_fields = 16 + WOTS_CHAINS + AUTH_DEPTH + 5 + 2;
     let mut args = vec![
         felt_u64_to_hex(total_fields as u64),
         felt_to_hex(auth_domain),
@@ -397,6 +399,8 @@ fn generate_shield_proof(
         felt_to_hex(&producer_address.nk_tag),
         felt_to_hex(&producer_address.d_j),
         felt_to_hex(producer_rseed),
+        felt_to_hex(&ASSET_TEZ), // asset_new (v1: tez only)
+        felt_to_hex(&ASSET_TEZ), // asset_producer (permanent: tez)
     ]);
 
     let proof = proof_from_bundle(generate_stark_bundle("run_shield.executable.json", &args)?);
