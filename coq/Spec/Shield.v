@@ -163,4 +163,102 @@ Section PhiShield.
                  cm_new; cm_producer;
                  memo; producer_memo].
 
+  (** ** Assembled [Phi_shield]
+
+      Shield has no inputs (entry point) and two output slots
+      (recipient note + producer-fee note).  The public side is
+      the L1 deposit ([v_deposit], drained via pubkey_hash). *)
+
+  Record ShieldOutput : Type := mkShieldOut {
+    so_cm        : Felt;
+    so_d_j       : Felt;
+    so_v_felt    : Felt;
+    so_v         : nat;
+    so_asset     : Felt;
+    so_rcm       : Felt;
+    so_auth_root : Felt;
+    so_pub_seed  : Felt;
+    so_nk_tag    : Felt;
+    so_memo      : Felt;
+  }.
+
+  Definition Phi_shield
+      (* public *)
+      (sighash auth_domain pubkey_hash tag_felt tag_pkh
+       auth_root_pkh auth_pub_seed_pkh blind
+       v_note_felt fee_felt producer_fee_felt : Felt)
+      (v_deposit fee : nat)
+      (* witness — two output slots *)
+      (out_recipient out_producer : ShieldOutput)
+    : Prop :=
+    phi_pubkey_hash pubkey_hash tag_pkh auth_domain
+        auth_root_pkh auth_pub_seed_pkh blind
+    /\ phi_recipient_commitment
+         (so_cm  out_recipient) (so_d_j out_recipient)
+         (so_v_felt out_recipient) (so_asset out_recipient)
+         (so_rcm out_recipient) (so_auth_root out_recipient)
+         (so_pub_seed out_recipient) (so_nk_tag out_recipient)
+    /\ phi_producer_commitment
+         (so_cm  out_producer) (so_d_j out_producer)
+         (so_v_felt out_producer) (so_asset out_producer)
+         (so_rcm out_producer) (so_auth_root out_producer)
+         (so_pub_seed out_producer) (so_nk_tag out_producer)
+    /\ phi_shield_asset_tez          (so_asset out_recipient)
+    /\ phi_shield_producer_asset_tez (so_asset out_producer)
+    /\ phi_shield_producer_fee       (so_v     out_producer)
+    /\ phi_shield_value_conservation
+         v_deposit (so_v out_recipient) (so_v out_producer) fee
+    /\ phi_shield_sighash
+         sighash tag_felt auth_domain pubkey_hash
+         v_note_felt fee_felt producer_fee_felt
+         (so_asset out_recipient) (so_asset out_producer)
+         (so_cm    out_recipient) (so_cm    out_producer)
+         (so_memo  out_recipient) (so_memo  out_producer).
+
+  (** ** Sanity-check consequences of [Phi_shield]. *)
+
+  Lemma Phi_shield_recipient_is_tez
+      sighash auth_domain pubkey_hash tag_felt tag_pkh
+      auth_root_pkh auth_pub_seed_pkh blind
+      v_note_felt fee_felt producer_fee_felt
+      v_deposit fee r p :
+    Phi_shield sighash auth_domain pubkey_hash tag_felt tag_pkh
+               auth_root_pkh auth_pub_seed_pkh blind
+               v_note_felt fee_felt producer_fee_felt
+               v_deposit fee r p ->
+    so_asset r = asset_tez.
+  Proof.
+    unfold Phi_shield, phi_shield_asset_tez. tauto.
+  Qed.
+
+  Lemma Phi_shield_producer_is_tez_positive
+      sighash auth_domain pubkey_hash tag_felt tag_pkh
+      auth_root_pkh auth_pub_seed_pkh blind
+      v_note_felt fee_felt producer_fee_felt
+      v_deposit fee r p :
+    Phi_shield sighash auth_domain pubkey_hash tag_felt tag_pkh
+               auth_root_pkh auth_pub_seed_pkh blind
+               v_note_felt fee_felt producer_fee_felt
+               v_deposit fee r p ->
+    so_asset p = asset_tez /\ so_v p > 0.
+  Proof.
+    unfold Phi_shield, phi_shield_producer_asset_tez,
+           phi_shield_producer_fee.
+    tauto.
+  Qed.
+
+  Lemma Phi_shield_balance
+      sighash auth_domain pubkey_hash tag_felt tag_pkh
+      auth_root_pkh auth_pub_seed_pkh blind
+      v_note_felt fee_felt producer_fee_felt
+      v_deposit fee r p :
+    Phi_shield sighash auth_domain pubkey_hash tag_felt tag_pkh
+               auth_root_pkh auth_pub_seed_pkh blind
+               v_note_felt fee_felt producer_fee_felt
+               v_deposit fee r p ->
+    v_deposit = so_v r + so_v p + fee.
+  Proof.
+    unfold Phi_shield, phi_shield_value_conservation. tauto.
+  Qed.
+
 End PhiShield.

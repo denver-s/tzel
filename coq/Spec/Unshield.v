@@ -160,4 +160,121 @@ Section PhiUnshield.
       (output_assets : list Felt) (output_values : list nat) : Prop :=
     length output_assets = length output_values.
 
+  (** ** Assembled [Phi_unshield]
+
+      Unshield has [N] (1..7) input notes (same shape as transfer),
+      3 private output slots (change_1, change_2, producer), and a
+      public L1 exit ([v_pub] of [asset_pub] to [recipient]).
+
+      Re-uses [InputData] / [OutputData] from [Spec.Transfer] so the
+      structure stays parallel between the two circuits. *)
+
+  Definition Phi_unshield
+      (* public *)
+      (sighash auth_domain root tag_felt fee_felt
+       v_pub_felt asset_pub recipient : Felt)
+      (fee v_pub : nat)
+      (* witness — inputs *)
+      (inputs : list InputData)
+      (* witness — 3 private outputs *)
+      (out_change_1 out_change_2 out_producer : OutputData)
+    : Prop :=
+    let n             := length inputs in
+    let input_assets  := map in_asset inputs in
+    let input_values  := map in_v     inputs in
+    let input_nfs     := map in_nf    inputs in
+    let outputs := [out_change_1; out_change_2; out_producer] in
+    let output_assets := map out_asset outputs in
+    let output_values := map out_v     outputs in
+    (* structural *)
+    phi_unshield_input_count n
+    /\ phi_unshield_input_lists_parallel  input_assets  input_values
+    /\ phi_unshield_output_lists_parallel output_assets output_values
+    (* per-input *)
+    /\ Forall (fun i =>
+         phi_unshield_input_wellformed
+           (in_cm i) (in_d_j i) (in_v_felt i) (in_asset i)
+           (in_rcm i) (in_otag i)) inputs
+    /\ Forall (fun i =>
+         phi_unshield_nullifier H_nf
+           (in_nf i) (in_nk_spend i) (in_cm i) (in_pos i)) inputs
+    (* per-output *)
+    /\ Forall (fun o =>
+         phi_unshield_output_wellformed
+           (out_cm o) (out_d_j o) (out_v_felt o) (out_asset o)
+           (out_rcm o) (out_otag o)) outputs
+    (* balance — per-asset with public exit and tez fee *)
+    /\ phi_unshield_value_conservation
+         input_assets input_values output_assets output_values
+         v_pub asset_pub fee
+    (* sighash *)
+    /\ phi_unshield_sighash
+         sighash tag_felt auth_domain root input_nfs
+         v_pub_felt asset_pub fee_felt recipient
+         (out_cm out_change_1) (out_cm out_change_2) (out_cm out_producer)
+         (out_memo out_change_1) (out_memo out_change_2)
+         (out_memo out_producer)
+    (* asset / fee pins *)
+    /\ phi_unshield_exit_asset_tez       asset_pub
+    /\ phi_unshield_producer_asset_tez   (out_asset out_producer)
+    /\ phi_unshield_fee_positive         (out_v     out_producer).
+
+  (** ** Sanity-check consequences of [Phi_unshield]. *)
+
+  Lemma Phi_unshield_input_count
+      sighash auth_domain root tag_felt fee_felt
+      v_pub_felt asset_pub recipient fee v_pub
+      inputs c1 c2 p :
+    Phi_unshield sighash auth_domain root tag_felt fee_felt
+                 v_pub_felt asset_pub recipient fee v_pub
+                 inputs c1 c2 p ->
+    1 <= length inputs <= 7.
+  Proof. unfold Phi_unshield, phi_unshield_input_count,
+                 phi_input_count. tauto. Qed.
+
+  Lemma Phi_unshield_exit_is_tez
+      sighash auth_domain root tag_felt fee_felt
+      v_pub_felt asset_pub recipient fee v_pub
+      inputs c1 c2 p :
+    Phi_unshield sighash auth_domain root tag_felt fee_felt
+                 v_pub_felt asset_pub recipient fee v_pub
+                 inputs c1 c2 p ->
+    asset_pub = asset_tez.
+  Proof. unfold Phi_unshield, phi_unshield_exit_asset_tez. tauto. Qed.
+
+  Lemma Phi_unshield_producer_is_tez_positive
+      sighash auth_domain root tag_felt fee_felt
+      v_pub_felt asset_pub recipient fee v_pub
+      inputs c1 c2 p :
+    Phi_unshield sighash auth_domain root tag_felt fee_felt
+                 v_pub_felt asset_pub recipient fee v_pub
+                 inputs c1 c2 p ->
+    out_asset p = asset_tez /\ out_v p > 0.
+  Proof.
+    unfold Phi_unshield,
+           phi_unshield_producer_asset_tez,
+           phi_unshield_fee_positive.
+    tauto.
+  Qed.
+
+  Lemma Phi_unshield_balance
+      sighash auth_domain root tag_felt fee_felt
+      v_pub_felt asset_pub recipient fee v_pub
+      inputs c1 c2 p :
+    Phi_unshield sighash auth_domain root tag_felt fee_felt
+                 v_pub_felt asset_pub recipient fee v_pub
+                 inputs c1 c2 p ->
+    forall a : Felt,
+      sum_at a (map in_asset inputs) (map in_v inputs)
+      = sum_at a
+          (map out_asset [c1; c2; p])
+          (map out_v     [c1; c2; p])
+        + (if Felt_eq_dec a asset_pub then v_pub else 0)
+        + (if Felt_eq_dec a asset_tez then fee   else 0).
+  Proof.
+    unfold Phi_unshield, phi_unshield_value_conservation.
+    intros H a. destruct H as [_ [_ [_ [_ [_ [_ [Hbal _]]]]]]].
+    apply Hbal.
+  Qed.
+
 End PhiUnshield.

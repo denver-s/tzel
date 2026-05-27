@@ -78,6 +78,40 @@ Fixpoint sum_at (target : Felt) (assets : list Felt) (values : list nat)
       (if Felt_eq_dec a target then v else 0) + sum_at target arest vrest
   end.
 
+(** ** Structural lemmas on [sum_at] *)
+
+Lemma sum_at_nil_left (target : Felt) (values : list nat) :
+  sum_at target nil values = 0.
+Proof. reflexivity. Qed.
+
+Lemma sum_at_nil_right (target : Felt) (assets : list Felt) :
+  sum_at target assets nil = 0.
+Proof. destruct assets; reflexivity. Qed.
+
+Lemma sum_at_cons (target a : Felt) (v : nat)
+    (arest : list Felt) (vrest : list nat) :
+  sum_at target (a :: arest) (v :: vrest)
+  = (if Felt_eq_dec a target then v else 0)
+    + sum_at target arest vrest.
+Proof. reflexivity. Qed.
+
+(** If every entry in a parallel list has asset equal to a single
+    non-target [a0], the [sum_at] for any [target ≠ a0] is zero. *)
+Lemma sum_at_uniform_other
+    (target a0 : Felt) (Hne : a0 <> target)
+    (n : nat) (values : list nat) :
+  length values = n ->
+  sum_at target (List.repeat a0 n) values = 0.
+Proof.
+  revert values.
+  induction n as [| n' IH]; intros values Hlen.
+  - destruct values; [reflexivity | discriminate].
+  - destruct values as [| v vs]; [discriminate |].
+    simpl. destruct (Felt_eq_dec a0 target) as [Heq | _].
+    + contradiction (Hne Heq).
+    + simpl. apply IH. simpl in Hlen. inversion Hlen. reflexivity.
+  Qed.
+
 (** ** Safety predicate components *)
 
 Section PhiTransfer.
@@ -249,5 +283,142 @@ Section PhiTransfer.
   Definition phi_output_lists_parallel
       (output_assets : list Felt) (output_values : list nat) : Prop :=
     length output_assets = length output_values.
+
+  (** ** Assembled [Phi_transfer]
+
+      The full transfer safety predicate, conjoining every conjunct
+      above.  Interpretation: if the Cairo circuit accepts (the
+      Relation holds), this proposition must hold.  Equivalent to
+      "the circuit cannot accept a transaction that violates any
+      conjunct."
+
+      Per-input fields are bundled in [InputData]; per-output fields
+      in [OutputData].  Outputs are exactly four positional slots
+      (recipient, change_1, change_2, producer).  Inputs are a list
+      of length 1..7.
+
+      Per-input Merkle inclusion and XMSS signature verification
+      are NOT in [Phi_transfer] — those are layered on at the
+      Relation level via [Spec.Merkle] and [Spec.Xmss].  Phi
+      captures the value / asset / sighash / commitment-binding
+      safety properties that come directly from this module's
+      conjuncts. *)
+
+  Record InputData : Type := mkInput {
+    in_cm        : Felt;
+    in_d_j       : Felt;
+    in_v_felt    : Felt;       (* value as Felt — for hashing *)
+    in_v         : nat;        (* value as nat — for balance *)
+    in_asset     : Felt;
+    in_rcm       : Felt;
+    in_otag      : Felt;
+    in_nk_spend  : Felt;
+    in_pos       : Felt;
+    in_nf        : Felt;
+  }.
+
+  Record OutputData : Type := mkOutput {
+    out_cm     : Felt;
+    out_d_j    : Felt;
+    out_v_felt : Felt;
+    out_v      : nat;
+    out_asset  : Felt;
+    out_rcm    : Felt;
+    out_otag   : Felt;
+    out_memo   : Felt;
+  }.
+
+  Definition Phi_transfer
+      (* public outputs *)
+      (sighash auth_domain root tag_felt fee_felt : Felt)
+      (fee : nat)
+      (* witness — inputs (length 1..7) *)
+      (inputs : list InputData)
+      (* witness — outputs (4 fixed slots) *)
+      (out_recipient out_change_1 out_change_2 out_producer : OutputData)
+    : Prop :=
+    let n             := length inputs in
+    let input_assets  := map in_asset inputs in
+    let input_values  := map in_v     inputs in
+    let input_nfs     := map in_nf    inputs in
+    let outputs := [out_recipient; out_change_1; out_change_2; out_producer] in
+    let output_assets := map out_asset outputs in
+    let output_values := map out_v     outputs in
+    (* structural *)
+    phi_input_count n
+    /\ phi_input_lists_parallel  input_assets  input_values
+    /\ phi_output_lists_parallel output_assets output_values
+    (* per-input *)
+    /\ Forall (fun i =>
+         phi_input_wellformed
+           (in_cm i) (in_d_j i) (in_v_felt i) (in_asset i)
+           (in_rcm i) (in_otag i)) inputs
+    /\ Forall (fun i =>
+         phi_nullifier_correct
+           (in_nf i) (in_nk_spend i) (in_cm i) (in_pos i)) inputs
+    (* per-output *)
+    /\ Forall (fun o =>
+         phi_output_wellformed
+           (out_cm o) (out_d_j o) (out_v_felt o) (out_asset o)
+           (out_rcm o) (out_otag o)) outputs
+    (* balance *)
+    /\ phi_value_conservation
+         input_assets input_values output_assets output_values fee
+    (* sighash *)
+    /\ phi_sighash_complete
+         sighash tag_felt auth_domain root input_nfs fee_felt
+         (out_cm out_recipient) (out_cm out_change_1)
+         (out_cm out_change_2)  (out_cm out_producer)
+         (out_memo out_recipient) (out_memo out_change_1)
+         (out_memo out_change_2)  (out_memo out_producer)
+    (* producer fee constraints *)
+    /\ phi_producer_asset_tez   (out_asset out_producer)
+    /\ phi_producer_fee_positive (out_v    out_producer).
+
+  (** ** Sanity-check consequences of [Phi_transfer]
+
+      Small lemmas verifying that the assembled Phi predicate has
+      the expected immediate consequences.  Each one extracts a
+      named conjunct; the proofs are pure destructuring. *)
+
+  Lemma Phi_transfer_input_count
+      sighash auth_domain root tag_felt fee_felt fee
+      inputs r c1 c2 p :
+    Phi_transfer sighash auth_domain root tag_felt fee_felt fee
+                 inputs r c1 c2 p ->
+    1 <= length inputs <= 7.
+  Proof. unfold Phi_transfer, phi_input_count. tauto. Qed.
+
+  Lemma Phi_transfer_producer_is_tez
+      sighash auth_domain root tag_felt fee_felt fee
+      inputs r c1 c2 p :
+    Phi_transfer sighash auth_domain root tag_felt fee_felt fee
+                 inputs r c1 c2 p ->
+    out_asset p = asset_tez /\ out_v p > 0.
+  Proof.
+    unfold Phi_transfer, phi_producer_asset_tez,
+           phi_producer_fee_positive.
+    tauto.
+  Qed.
+
+  (** Per-asset balance is preserved.  This is the value-conservation
+      property of the protocol — for every asset, value in equals
+      value out plus the tez-fee contribution. *)
+  Lemma Phi_transfer_balance
+      sighash auth_domain root tag_felt fee_felt fee
+      inputs r c1 c2 p :
+    Phi_transfer sighash auth_domain root tag_felt fee_felt fee
+                 inputs r c1 c2 p ->
+    forall a : Felt,
+      sum_at a (map in_asset inputs) (map in_v inputs)
+      = sum_at a
+          (map out_asset [r; c1; c2; p])
+          (map out_v     [r; c1; c2; p])
+        + (if Felt_eq_dec a asset_tez then fee else 0).
+  Proof.
+    unfold Phi_transfer, phi_value_conservation.
+    intros H a. destruct H as [_ [_ [_ [_ [_ [_ [Hbal _]]]]]]].
+    apply Hbal.
+  Qed.
 
 End PhiTransfer.
