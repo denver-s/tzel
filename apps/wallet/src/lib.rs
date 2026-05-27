@@ -8359,12 +8359,13 @@ fn cmd_unshield(
             &root,
             &nfs_for_sh,
             amount,
+            &ASSET_TEZ,
             fee,
             &recipient_f,
             &cm_change,
             &mh_change_f,
             &producer_note.cm,
-            &producer_note.mh,
+            &producer_note.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -9079,12 +9080,13 @@ fn cmd_unshield_rollup(
             &root,
             &nullifiers,
             amount,
+            &ASSET_TEZ,
             fee,
             &recipient_f,
             &cm_change,
             &mh_change_f,
             &producer_note.cm,
-            &producer_note.mh,
+            &producer_note.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];

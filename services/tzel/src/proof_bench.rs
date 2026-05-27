@@ -438,12 +438,13 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         &root,
         &nullifiers,
         v_pub,
+        &ASSET_TEZ,
         fee,
         &recipient,
         &cm_change,
         &mh_change,
         &cm_fee,
-        &mh_fee,
+        &mh_fee
     );
 
     let mut cm_paths = Vec::with_capacity(n_inputs);
@@ -456,8 +457,16 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         wots_sigs.push(sig);
     }
 
-    let total_fields =
-        6 + 9 * n_inputs + n_inputs * DEPTH + n_inputs * AUTH_DEPTH + n_inputs * WOTS_CHAINS + 15;
+    // Phase B: + n_inputs input_assets + asset_change + asset_fee
+    // + asset_pub + primary_non_tez_asset = n_inputs + 4 extra felts.
+    let total_fields = 6
+        + 9 * n_inputs
+        + n_inputs * DEPTH
+        + n_inputs * AUTH_DEPTH
+        + n_inputs * WOTS_CHAINS
+        + 15
+        + n_inputs
+        + 4;
     let mut args = Vec::with_capacity(total_fields + 1);
     args.push(felt_u64_to_hex(total_fields as u64));
     args.push(felt_u64_to_hex(n_inputs as u64));
@@ -493,6 +502,10 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
             args.push(felt_to_hex(s));
         }
     }
+    // Multiasset Phase B: per-input asset tags.
+    for _ in 0..n_inputs {
+        args.push(felt_to_hex(&ASSET_TEZ));
+    }
 
     args.push(felt_u64_to_hex(1));
     args.push(felt_to_hex(&d_j_change));
@@ -502,6 +515,7 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_change));
     args.push(felt_to_hex(&nk_tag_change));
     args.push(felt_to_hex(&mh_change));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_change
 
     args.push(felt_to_hex(&d_j_fee));
     args.push(felt_u64_to_hex(producer_fee));
@@ -510,11 +524,16 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_fee));
     args.push(felt_to_hex(&nk_tag_fee));
     args.push(felt_to_hex(&mh_fee));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_fee
+
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_pub (v1: tez only)
+    args.push(felt_to_hex(&ASSET_TEZ)); // primary_non_tez_asset
 
     let mut expected_public_outputs = vec![auth_domain, root];
     expected_public_outputs.extend(nullifiers.iter().copied());
     expected_public_outputs.extend([
         u64_to_felt(v_pub),
+        ASSET_TEZ, // asset_pub (multiasset Phase B)
         u64_to_felt(fee),
         recipient,
         cm_change,

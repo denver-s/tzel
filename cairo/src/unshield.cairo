@@ -17,6 +17,7 @@ fn change_commitment_or_zero(
     has_change: bool,
     d_j_change: felt252,
     v_change: u64,
+    asset_change: felt252,
     rseed_change: felt252,
     auth_root_change: felt252,
     auth_pub_seed_change: felt252,
@@ -26,7 +27,7 @@ fn change_commitment_or_zero(
     if has_change {
         let rcm_c = hash::derive_rcm(rseed_change);
         let otag_c = hash::owner_tag(auth_root_change, auth_pub_seed_change, nk_tag_change);
-        hash::commit(d_j_change, v_change, ASSET_TEZ, rcm_c, otag_c)
+        hash::commit(d_j_change, v_change, asset_change, rcm_c, otag_c)
     } else {
         assert(v_change == 0, 'unshield: no change but v!=0');
         assert(memo_ct_hash_change == 0, 'unshield: mh!=0 but no change');
@@ -35,6 +36,7 @@ fn change_commitment_or_zero(
         assert(auth_root_change == 0, 'unshield: ar!=0 but no change');
         assert(auth_pub_seed_change == 0, 'unshield: ps!=0 but no change');
         assert(nk_tag_change == 0, 'unshield: nkt!=0 but no change');
+        assert(asset_change == 0, 'unshield: asset!=0 no change');
         0
     }
 }
@@ -72,6 +74,16 @@ pub fn verify(
     auth_pub_seed_fee: felt252,
     nk_tag_fee: felt252,
     memo_ct_hash_fee: felt252,
+    // Multiasset (Phase B). asset_pub is the L1 exit asset (pinned to
+    // ASSET_TEZ in v1: only the tez bridge exists for exits). asset_change
+    // and asset_fee are private-output assets; the producer fee is pinned
+    // to ASSET_TEZ permanently by the liquidity argument. The change slot
+    // may hold tez or the witness-declared primary non-tez asset.
+    input_asset_list: Span<felt252>,
+    asset_change: felt252,
+    asset_fee: felt252,
+    asset_pub: felt252,
+    primary_non_tez_asset: felt252,
 ) -> Array<felt252> {
     let n = nf_list.len();
     assert(n >= 1, 'unshield: need >= 1 input');
@@ -87,6 +99,12 @@ pub fn verify(
     assert(rseed_in_list.len() == n, 'unshield: rseed len');
     assert(cm_path_indices_list.len() == n, 'unshield: path len');
     assert(cm_siblings_flat.len() == n * merkle::TREE_DEPTH, 'unshield: cm_sibs len');
+    assert(input_asset_list.len() == n, 'unshield: asset list len');
+
+    // v1 single-bridge constraint: the public L1 exit can only be tez.
+    assert(asset_pub == ASSET_TEZ, 'unshield: v1 tez exit only');
+    // Permanent: producer fee must be tez.
+    assert(asset_fee == ASSET_TEZ, 'unshield: producer must be tez');
 
     let mut sighash = hash::sighash_fold(0x02, auth_domain);
     sighash = hash::sighash_fold(sighash, root);
@@ -96,12 +114,14 @@ pub fn verify(
         si += 1;
     }
     sighash = hash::sighash_fold(sighash, v_pub.into());
+    sighash = hash::sighash_fold(sighash, asset_pub);
     sighash = hash::sighash_fold(sighash, fee.into());
     sighash = hash::sighash_fold(sighash, recipient);
     let cm_change_val = change_commitment_or_zero(
         has_change,
         d_j_change,
         v_change,
+        asset_change,
         rseed_change,
         auth_root_change,
         auth_pub_seed_change,
@@ -112,11 +132,22 @@ pub fn verify(
     sighash = hash::sighash_fold(sighash, memo_ct_hash_change);
     let rcm_fee = hash::derive_rcm(rseed_fee);
     let otag_fee = hash::owner_tag(auth_root_fee, auth_pub_seed_fee, nk_tag_fee);
-    let cm_fee = hash::commit(d_j_fee, v_fee, ASSET_TEZ, rcm_fee, otag_fee);
+    let cm_fee = hash::commit(d_j_fee, v_fee, asset_fee, rcm_fee, otag_fee);
     sighash = hash::sighash_fold(sighash, cm_fee);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_fee);
 
-    let mut sum_in: u128 = 0;
+    // Change slot must be in {tez, primary_non_tez_asset}.  If no change
+    // is published, asset_change is forced to zero by
+    // change_commitment_or_zero, and ASSET_TEZ = 0 so it satisfies the
+    // tez branch trivially.
+    assert(
+        asset_change == ASSET_TEZ || asset_change == primary_non_tez_asset,
+        'unshield: bad asset_change',
+    );
+
+    // 2-accumulator per-asset balance.
+    let mut tez_in: u128 = 0;
+    let mut primary_in: u128 = 0;
     let mut i: u32 = 0;
     while i < n {
         let nk_spend = *nk_spend_list.at(i);
@@ -127,11 +158,17 @@ pub fn verify(
         let v: u64 = *v_in_list.at(i);
         let rseed = *rseed_in_list.at(i);
         let cm_path_idx = *cm_path_indices_list.at(i);
+        let asset_i = *input_asset_list.at(i);
+
+        assert(
+            asset_i == ASSET_TEZ || asset_i == primary_non_tez_asset,
+            'unshield: bad input asset',
+        );
 
         let nk_tag = hash::derive_nk_tag(nk_spend);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
         let rcm = hash::derive_rcm(rseed);
-        let cm = hash::commit(d_j, v, ASSET_TEZ, rcm, otag);
+        let cm = hash::commit(d_j, v, asset_i, rcm, otag);
 
         let cm_sib_start = i * merkle::TREE_DEPTH;
         let cm_siblings = cm_siblings_flat.slice(cm_sib_start, merkle::TREE_DEPTH);
@@ -153,13 +190,33 @@ pub fn verify(
         let nf = hash::nullifier(nk_spend, cm, cm_path_idx);
         assert(nf == *nf_list.at(i), 'unshield: bad nf');
 
-        sum_in += v.into();
+        if asset_i == ASSET_TEZ {
+            tez_in += v.into();
+        } else {
+            primary_in += v.into();
+        }
         i += 1;
     }
 
     assert(v_fee > 0_u64, 'unshield prod fee');
-    let sum_out: u128 = v_pub.into() + v_change.into() + v_fee.into() + fee.into();
-    assert(sum_in == sum_out, 'unshield: balance mismatch');
+
+    // Tally outputs into the per-asset accumulators. asset_pub and
+    // asset_fee are both ASSET_TEZ (asserted above). The change slot
+    // routes to tez_out or primary_out based on its witness asset.
+    let mut tez_out: u128 = v_fee.into(); // producer fee pinned to tez
+    let mut primary_out: u128 = 0;
+    if asset_change == ASSET_TEZ {
+        tez_out += v_change.into();
+    } else {
+        primary_out += v_change.into();
+    }
+    // The public exit always lands in the tez accumulator (asset_pub
+    // pinned to ASSET_TEZ above).
+    tez_out += v_pub.into();
+
+    // Per-asset balance.
+    assert(tez_in == tez_out + fee.into(), 'unshield: tez balance');
+    assert(primary_in == primary_out, 'unshield: primary balance');
 
     let mut outputs: Array<felt252> = array![auth_domain, root];
     let mut j: u32 = 0;
@@ -168,6 +225,7 @@ pub fn verify(
         j += 1;
     }
     outputs.append(v_pub.into());
+    outputs.append(asset_pub);
     outputs.append(fee.into());
     outputs.append(recipient);
     outputs.append(cm_change_val);
@@ -219,6 +277,12 @@ mod tests {
         auth_pub_seed_fee: felt252,
         nk_tag_fee: felt252,
         memo_ct_hash_fee: felt252,
+        // Multiasset Phase B
+        input_asset_list: Array<felt252>,
+        asset_change: felt252,
+        asset_fee: felt252,
+        asset_pub: felt252,
+        primary_non_tez_asset: felt252,
     }
 
     fn copy_and_mutate(values: Span<felt252>, target: u32) -> Array<felt252> {
@@ -305,6 +369,7 @@ mod tests {
         root: felt252,
         nf_list: Span<felt252>,
         v_pub: u64,
+        asset_pub: felt252,
         fee: u64,
         recipient: felt252,
         cm_change: felt252,
@@ -320,6 +385,7 @@ mod tests {
             i += 1;
         }
         sighash = hash::sighash_fold(sighash, v_pub.into());
+        sighash = hash::sighash_fold(sighash, asset_pub);
         sighash = hash::sighash_fold(sighash, fee.into());
         sighash = hash::sighash_fold(sighash, recipient);
         sighash = hash::sighash_fold(sighash, cm_change);
@@ -362,6 +428,7 @@ mod tests {
             root,
             array![nf].span(),
             v_pub,
+            ASSET_TEZ,
             fee,
             recipient,
             cm_change,
@@ -431,11 +498,12 @@ mod tests {
             has_change,
             d_j_change,
             v_change,
+            ASSET_TEZ,
             rseed_change,
             auth_root_change,
             auth_pub_seed_change,
             nk_tag_change,
-            memo_ct_hash_change,
+            memo_ct_hash_change
         );
 
         let d_j_fee = 0x8512;
@@ -496,6 +564,12 @@ mod tests {
             auth_pub_seed_fee,
             nk_tag_fee,
             memo_ct_hash_fee,
+            // Multiasset Phase B: pure-tez single-input fixture.
+            input_asset_list: array![ASSET_TEZ],
+            asset_change: ASSET_TEZ,
+            asset_fee: ASSET_TEZ,
+            asset_pub: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -612,11 +686,12 @@ mod tests {
             has_change,
             d_j_change,
             v_change,
+            ASSET_TEZ,
             rseed_change,
             auth_root_change,
             auth_pub_seed_change,
             nk_tag_change,
-            memo_ct_hash_change,
+            memo_ct_hash_change
         );
 
         let d_j_fee = 0x9712;
@@ -635,6 +710,7 @@ mod tests {
             root,
             nf_list.span(),
             v_pub,
+            ASSET_TEZ,
             fee,
             recipient,
             cm_change,
@@ -714,6 +790,12 @@ mod tests {
             auth_pub_seed_fee,
             nk_tag_fee,
             memo_ct_hash_fee,
+            // Multiasset Phase B: pure-tez two-input fixture.
+            input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
+            asset_change: ASSET_TEZ,
+            asset_fee: ASSET_TEZ,
+            asset_pub: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -723,17 +805,19 @@ mod tests {
             base.has_change,
             base.d_j_change,
             base.v_change,
+            ASSET_TEZ,
             base.rseed_change,
             base.auth_root_change,
             base.auth_pub_seed_change,
             base.nk_tag_change,
-            base.memo_ct_hash_change,
+            base.memo_ct_hash_change
         );
         let sighash = unshield_sighash(
             base.auth_domain,
             base.root,
             array![*base.nf_list.at(0), *base.nf_list.at(0)].span(),
             base.v_pub,
+            ASSET_TEZ,
             base.fee,
             base.recipient,
             cm_change,
@@ -827,6 +911,12 @@ mod tests {
             auth_pub_seed_fee: base.auth_pub_seed_fee,
             nk_tag_fee: base.nk_tag_fee,
             memo_ct_hash_fee: base.memo_ct_hash_fee,
+            // Multiasset Phase B: pure-tez duplicate-nf fixture (2 inputs).
+            input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
+            asset_change: ASSET_TEZ,
+            asset_fee: ASSET_TEZ,
+            asset_pub: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -864,12 +954,17 @@ mod tests {
             fixture.auth_pub_seed_fee,
             fixture.nk_tag_fee,
             fixture.memo_ct_hash_fee,
+            fixture.input_asset_list.span(),
+            fixture.asset_change,
+            fixture.asset_fee,
+            fixture.asset_pub,
+            fixture.primary_non_tez_asset,
         )
     }
 
     #[test]
     fn test_change_commitment_or_zero_accepts_all_zero_no_change() {
-        assert(change_commitment_or_zero(false, 0, 0, 0, 0, 0, 0, 0) == 0, 'zero ok');
+        assert(change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 0, 0, 0, 0, 0) == 0, 'zero ok');
     }
 
     #[test]
@@ -888,7 +983,7 @@ mod tests {
 
         assert(
             change_commitment_or_zero(
-                true, d_j, v, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash,
+                true, d_j, v, ASSET_TEZ, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash
             ) == expected,
             'change cm',
         );
@@ -897,43 +992,43 @@ mod tests {
     #[test]
     #[should_panic(expected: ('unshield: no change but v!=0',))]
     fn test_change_commitment_or_zero_rejects_nonzero_value_without_change() {
-        change_commitment_or_zero(false, 0, 1_u64, 0, 0, 0, 0, 0);
+        change_commitment_or_zero(false, 0, 1_u64, ASSET_TEZ, 0, 0, 0, 0, 0);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: mh!=0 but no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_memo_without_change() {
-        change_commitment_or_zero(false, 0, 0, 0, 0, 0, 0, 1);
+        change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 0, 0, 0, 0, 1);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: d_j!=0 but no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_dj_without_change() {
-        change_commitment_or_zero(false, 1, 0, 0, 0, 0, 0, 0);
+        change_commitment_or_zero(false, 1, 0, ASSET_TEZ, 0, 0, 0, 0, 0);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: rseed!=0 no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_rseed_without_change() {
-        change_commitment_or_zero(false, 0, 0, 1, 0, 0, 0, 0);
+        change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 1, 0, 0, 0, 0);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: ar!=0 but no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_auth_root_without_change() {
-        change_commitment_or_zero(false, 0, 0, 0, 1, 0, 0, 0);
+        change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 0, 1, 0, 0, 0);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: ps!=0 but no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_pub_seed_without_change() {
-        change_commitment_or_zero(false, 0, 0, 0, 0, 1, 0, 0);
+        change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 0, 0, 1, 0, 0);
     }
 
     #[test]
     #[should_panic(expected: ('unshield: nkt!=0 but no change',))]
     fn test_change_commitment_or_zero_rejects_nonzero_nk_tag_without_change() {
-        change_commitment_or_zero(false, 0, 0, 0, 0, 0, 1, 0);
+        change_commitment_or_zero(false, 0, 0, ASSET_TEZ, 0, 0, 0, 1, 0);
     }
 
     #[test]
@@ -944,11 +1039,12 @@ mod tests {
             fixture.has_change,
             fixture.d_j_change,
             fixture.v_change,
+            ASSET_TEZ,
             fixture.rseed_change,
             fixture.auth_root_change,
             fixture.auth_pub_seed_change,
             fixture.nk_tag_change,
-            fixture.memo_ct_hash_change,
+            fixture.memo_ct_hash_change
         );
         let cm_fee = note_commitment(
             fixture.d_j_fee,
@@ -958,31 +1054,35 @@ mod tests {
             fixture.auth_pub_seed_fee,
             fixture.nk_tag_fee,
         );
-        assert(outputs.len() == 10, 'unshield outputs len');
+        // Multiasset Phase B: outputs now include asset_pub after v_pub.
+        assert(outputs.len() == 11, 'unshield outputs len');
         assert(*outputs.at(0) == fixture.auth_domain, 'unshield out domain');
         assert(*outputs.at(1) == fixture.root, 'unshield out root');
         assert(*outputs.at(2) == *fixture.nf_list.at(0), 'unshield out nf');
         assert(*outputs.at(3) == fixture.v_pub.into(), 'unshield out vpub');
-        assert(*outputs.at(4) == fixture.fee.into(), 'unshield out fee');
-        assert(*outputs.at(5) == fixture.recipient, 'unshield out recipient');
-        assert(*outputs.at(6) == cm_change, 'unshield out change');
-        assert(*outputs.at(7) == fixture.memo_ct_hash_change, 'unshield out memo');
-        assert(*outputs.at(8) == cm_fee, 'unshield out fee cm');
-        assert(*outputs.at(9) == fixture.memo_ct_hash_fee, 'unshield out fee memo');
+        assert(*outputs.at(4) == fixture.asset_pub, 'unshield out asset_pub');
+        assert(*outputs.at(5) == fixture.fee.into(), 'unshield out fee');
+        assert(*outputs.at(6) == fixture.recipient, 'unshield out recipient');
+        assert(*outputs.at(7) == cm_change, 'unshield out change');
+        assert(*outputs.at(8) == fixture.memo_ct_hash_change, 'unshield out memo');
+        assert(*outputs.at(9) == cm_fee, 'unshield out fee cm');
+        assert(*outputs.at(10) == fixture.memo_ct_hash_fee, 'unshield out fee memo');
     }
 
     #[test]
     fn test_unshield_accepts_valid_two_input_statement() {
         let fixture = build_two_input_fixture();
         let outputs = run_verify(@fixture);
-        assert(outputs.len() == 11, 'unshield outputs len two input');
+        // Multiasset Phase B: +1 for asset_pub.
+        assert(outputs.len() == 12, 'unshield outputs len two input');
         assert(*outputs.at(0) == fixture.auth_domain, 'unshield2 out domain');
         assert(*outputs.at(1) == fixture.root, 'unshield2 out root');
         assert(*outputs.at(2) == *fixture.nf_list.at(0), 'unshield2 out nf0');
         assert(*outputs.at(3) == *fixture.nf_list.at(1), 'unshield2 out nf1');
         assert(*outputs.at(4) == fixture.v_pub.into(), 'unshield2 out vpub');
-        assert(*outputs.at(5) == fixture.fee.into(), 'unshield2 out fee');
-        assert(*outputs.at(6) == fixture.recipient, 'unshield2 out recipient');
+        assert(*outputs.at(5) == fixture.asset_pub, 'unshield2 out asset_pub');
+        assert(*outputs.at(6) == fixture.fee.into(), 'unshield2 out fee');
+        assert(*outputs.at(7) == fixture.recipient, 'unshield2 out recipient');
     }
 
     #[test]
@@ -1002,11 +1102,12 @@ mod tests {
             fixture.has_change,
             fixture.d_j_change,
             fixture.v_change,
+            ASSET_TEZ,
             fixture.rseed_change,
             fixture.auth_root_change,
             fixture.auth_pub_seed_change,
             fixture.nk_tag_change,
-            fixture.memo_ct_hash_change,
+            fixture.memo_ct_hash_change
         );
         fixture
             .wots_sig_flat =
@@ -1067,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected: ('unshield: balance mismatch',))]
+    #[should_panic(expected: ('unshield: tez balance',))]
     fn test_unshield_rejects_balance_mismatch_even_with_consistent_change_commitment() {
         let fixture = build_fixture_with_values_and_fee(80_u64, 47_u64, 24_u64, 3_u64, 5_u64);
         run_verify(@fixture);

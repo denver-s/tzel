@@ -13,8 +13,12 @@
 ///   Then per input (N times): TREE_DEPTH cm siblings
 ///   Then per input (N times): AUTH_DEPTH auth siblings
 ///   Then per input (N times): WOTS_CHAINS sig values
-///   Then change: has_change, d_j, v, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash
-///   Then producer fee note: d_j, v, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash
+///   Then per input (N times): asset_i (multiasset Phase B)
+///   Then change: has_change, d_j, v, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash,
+///        asset_change
+///   Then producer fee note: d_j, v, rseed, auth_root, auth_pub_seed, nk_tag, memo_ct_hash,
+///        asset_fee
+///   Then: asset_pub, primary_non_tez_asset (multiasset Phase B)
 
 use tzel::merkle;
 use tzel::{unshield, xmss_common};
@@ -93,6 +97,15 @@ fn main(args: Array<felt252>) -> Array<felt252> {
         i += 1;
     }
 
+    // Multiasset Phase B: per-input asset tags.
+    let mut input_asset_list: Array<felt252> = array![];
+    let mut i: u32 = 0;
+    while i < n {
+        input_asset_list.append(*args.at(pos));
+        pos += 1;
+        i += 1;
+    }
+
     let has_change_felt: u64 = (*args.at(pos)).try_into().unwrap();
     pos += 1;
     assert(has_change_felt <= 1, 'has_change must be 0 or 1');
@@ -111,6 +124,8 @@ fn main(args: Array<felt252>) -> Array<felt252> {
     pos += 1;
     let mh_change = *args.at(pos);
     pos += 1;
+    let asset_change = *args.at(pos);
+    pos += 1;
 
     let d_j_fee = *args.at(pos);
     pos += 1;
@@ -125,6 +140,13 @@ fn main(args: Array<felt252>) -> Array<felt252> {
     let nk_tag_fee = *args.at(pos);
     pos += 1;
     let mh_fee = *args.at(pos);
+    pos += 1;
+    let asset_fee = *args.at(pos);
+    pos += 1;
+
+    let asset_pub = *args.at(pos);
+    pos += 1;
+    let primary_non_tez_asset = *args.at(pos);
     pos += 1;
 
     assert(pos == args.len(), 'unexpected trailing args');
@@ -162,5 +184,10 @@ fn main(args: Array<felt252>) -> Array<felt252> {
         auth_pub_seed_fee,
         nk_tag_fee,
         mh_fee,
+        input_asset_list.span(),
+        asset_change,
+        asset_fee,
+        asset_pub,
+        primary_non_tez_asset,
     )
 }

@@ -578,16 +578,19 @@ fn generate_unshield_proof(
         &root,
         &nullifiers,
         v_pub,
+        &ASSET_TEZ,
         fee,
         &recipient_f,
         &ZERO,
         &ZERO,
         &fee_cm,
-        &fee_mh,
+        &fee_mh
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, 0, &sighash);
 
-    let total_fields = 6 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 15;
+    // Phase B: +1 input_asset, +1 asset_change, +1 asset_fee, +1 asset_pub,
+    // +1 primary_non_tez_asset.
+    let total_fields = 6 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 15 + 5;
     let mut args = vec![
         felt_u64_to_hex(total_fields as u64),
         felt_u64_to_hex(1),
@@ -616,6 +619,8 @@ fn generate_unshield_proof(
     for felt in &sig {
         args.push(felt_to_hex(felt));
     }
+    // Multiasset Phase B: per-input asset (1 input).
+    args.push(felt_to_hex(&ASSET_TEZ));
 
     args.extend([
         felt_u64_to_hex(0),
@@ -626,6 +631,7 @@ fn generate_unshield_proof(
         "0x0".into(),
         "0x0".into(),
         "0x0".into(),
+        "0x0".into(), // asset_change (zero — no change for this fixture)
         felt_to_hex(&fee_address.d_j),
         felt_u64_to_hex(fee_amount),
         felt_to_hex(fee_rseed),
@@ -633,6 +639,9 @@ fn generate_unshield_proof(
         felt_to_hex(&fee_address.auth_pub_seed),
         felt_to_hex(&fee_address.nk_tag),
         felt_to_hex(&fee_mh),
+        felt_to_hex(&ASSET_TEZ), // asset_fee
+        felt_to_hex(&ASSET_TEZ), // asset_pub (v1: tez only)
+        felt_to_hex(&ASSET_TEZ), // primary_non_tez_asset
     ]);
 
     if note_commitment(&input_addr.payment, input_value, input_rseed) != input_cm {

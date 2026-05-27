@@ -459,6 +459,7 @@ pub fn unshield_sighash(
     root: &F,
     nullifiers: &[F],
     v_pub: u64,
+    asset_pub: &F,
     fee: u64,
     recipient: &F,
     cm_change: &F,
@@ -475,6 +476,7 @@ pub fn unshield_sighash(
         sh = sighash_fold(&sh, nf);
     }
     sh = sighash_fold(&sh, &u64_to_felt(v_pub));
+    sh = sighash_fold(&sh, asset_pub);
     sh = sighash_fold(&sh, &u64_to_felt(fee));
     sh = sighash_fold(&sh, recipient);
     sh = sighash_fold(&sh, cm_change);
@@ -3984,12 +3986,13 @@ mod tests {
             &root,
             &nullifiers,
             12,
+            &ASSET_TEZ,
             fee,
             &recipient,
             &cm_1,
             &cm_fee,
             &mh_1,
-            &mh_fee,
+            &mh_fee
         );
         assert_ne!(
             unshield,
@@ -3998,12 +4001,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 13,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4013,12 +4018,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &u(10),
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4028,12 +4035,14 @@ mod tests {
                 &u(20),
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4043,12 +4052,14 @@ mod tests {
                 &root,
                 &[u(4), u(3)],
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4058,12 +4069,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee + 1,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4073,12 +4086,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &u(11),
                 &cm_fee,
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4088,12 +4103,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &u(14),
                 &mh_1,
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4103,12 +4120,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &u(12),
                 &mh_fee
+            
             )
         );
         assert_ne!(
@@ -4118,12 +4137,14 @@ mod tests {
                 &root,
                 &nullifiers,
                 12,
+                &ASSET_TEZ,
                 fee,
                 &recipient,
                 &cm_1,
                 &cm_fee,
                 &mh_1,
                 &u(15)
+            
             )
         );
     }
