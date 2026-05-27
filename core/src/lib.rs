@@ -431,9 +431,11 @@ pub fn transfer_sighash(
     cm_1: &F,
     cm_2: &F,
     cm_3: &F,
+    cm_4: &F,
     mh_1: &F,
     mh_2: &F,
     mh_3: &F,
+    mh_4: &F,
 ) -> F {
     // Circuit-type tag 0x01 for transfer
     let mut type_tag = ZERO;
@@ -447,9 +449,11 @@ pub fn transfer_sighash(
     sh = sighash_fold(&sh, cm_1);
     sh = sighash_fold(&sh, cm_2);
     sh = sighash_fold(&sh, cm_3);
+    sh = sighash_fold(&sh, cm_4);
     sh = sighash_fold(&sh, mh_1);
     sh = sighash_fold(&sh, mh_2);
     sh = sighash_fold(&sh, mh_3);
+    sh = sighash_fold(&sh, mh_4);
     sh
 }
 
@@ -3669,8 +3673,10 @@ mod tests {
                 &cm_producer,
                 &mh_recipient,
                 &mh_recipient,
+                &mh_recipient,
                 &mh_producer,
                 &mh_producer,
+                &mh_producer
             )
         );
     }
@@ -3811,9 +3817,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh_1,
             &mh_2,
             &mh_3,
+            &mh_3
         );
         assert_ne!(
             transfer,
@@ -3825,9 +3833,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3840,9 +3852,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3855,9 +3871,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3870,9 +3890,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3885,9 +3909,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3900,9 +3928,13 @@ mod tests {
                 &u(50),
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3915,9 +3947,13 @@ mod tests {
                 &cm_1,
                 &u(60),
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3930,9 +3966,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &u(61),
+                &u(61),
                 &mh_1,
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3944,10 +3984,14 @@ mod tests {
                 fee,
                 &cm_1,
                 &cm_2,
+                &cm_3,
                 &cm_3,
                 &u(70),
                 &mh_2,
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3959,10 +4003,14 @@ mod tests {
                 fee,
                 &cm_1,
                 &cm_2,
+                &cm_3,
                 &cm_3,
                 &mh_1,
                 &u(80),
                 &mh_3
+            ,
+                &mh_3
+            
             )
         );
         assert_ne!(
@@ -3975,9 +4023,13 @@ mod tests {
                 &cm_1,
                 &cm_2,
                 &cm_3,
+                &cm_3,
                 &mh_1,
                 &mh_2,
                 &u(81)
+            ,
+                &u(81)
+            
             )
         );
 

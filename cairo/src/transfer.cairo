@@ -21,9 +21,14 @@ pub fn verify(
     root: felt252,
     nf_list: Span<felt252>,
     fee: u64,
+    // Phase C: N→4 layout. Output positions: 1=recipient,
+    // 2=change_1, 3=change_2, 4=producer-fee. The producer fee is
+    // pinned to ASSET_TEZ and must be > 0. The two change slots are
+    // free-form (any asset in {ASSET_TEZ, primary_non_tez_asset}).
     cm_1: felt252,
     cm_2: felt252,
     cm_3: felt252,
+    cm_4: felt252,
     nk_spend_list: Span<felt252>,
     auth_root_list: Span<felt252>,
     auth_pub_seed_list: Span<felt252>,
@@ -62,6 +67,14 @@ pub fn verify(
     nk_tag_3: felt252,
     memo_ct_hash_3: felt252,
     asset_3: felt252,
+    d_j_4: felt252,
+    v_4: u64,
+    rseed_4: felt252,
+    auth_root_4: felt252,
+    auth_pub_seed_4: felt252,
+    nk_tag_4: felt252,
+    memo_ct_hash_4: felt252,
+    asset_4: felt252,
     // 2-accumulator multiasset balance witness: every input and output
     // asset must be in {ASSET_TEZ, primary_non_tez_asset}. For pure-tez
     // transactions, primary_non_tez_asset may be any value (no constraint
@@ -85,10 +98,10 @@ pub fn verify(
     assert(cm_siblings_flat.len() == n * merkle::TREE_DEPTH, 'transfer: cm_sibs len');
     assert(auth_siblings_flat.len() == n * merkle::AUTH_DEPTH, 'transfer: auth_sibs len');
     assert(wots_sig_flat.len() == n * xmss_common::WOTS_CHAINS, 'transfer: wots sig len');
-    // Producer-fee output (asset_3) must be tez so the DAL slot
-    // publisher can monetize it regardless of the transfer's primary
-    // asset. This is permanent (not v1-only).
-    assert(asset_3 == ASSET_TEZ, 'transfer: producer must be tez');
+    // Phase C: producer-fee output is now slot 4. It must be tez so the
+    // DAL slot publisher can monetize it regardless of the transfer's
+    // primary asset. Permanent (not v1-only).
+    assert(asset_4 == ASSET_TEZ, 'transfer: producer must be tez');
 
     let mut sighash = hash::sighash_fold(0x01, auth_domain);
     sighash = hash::sighash_fold(sighash, root);
@@ -101,9 +114,11 @@ pub fn verify(
     sighash = hash::sighash_fold(sighash, cm_1);
     sighash = hash::sighash_fold(sighash, cm_2);
     sighash = hash::sighash_fold(sighash, cm_3);
+    sighash = hash::sighash_fold(sighash, cm_4);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_1);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_2);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_3);
+    sighash = hash::sighash_fold(sighash, memo_ct_hash_4);
 
     // 2-accumulator per-asset balance: tez_in / tez_out accumulate
     // contributions whose asset == ASSET_TEZ; primary_in / primary_out
@@ -192,7 +207,11 @@ pub fn verify(
         'transfer: bad cm_2',
     );
 
-    // Output 3 (producer fee): asset pinned to tez above; reconstruct cm.
+    // Output 3 (change_2): asset must be in {tez, primary}.
+    assert(
+        asset_3 == ASSET_TEZ || asset_3 == primary_non_tez_asset,
+        'transfer: bad asset_3',
+    );
     let rcm_3 = hash::derive_rcm(rseed_3);
     let otag_3 = hash::owner_tag(auth_root_3, auth_pub_seed_3, nk_tag_3);
     assert(
@@ -200,10 +219,18 @@ pub fn verify(
         'transfer: bad cm_3',
     );
 
-    assert(v_3 > 0_u64, 'transfer prod fee');
+    // Output 4 (producer fee): asset pinned to tez above; reconstruct cm.
+    let rcm_4 = hash::derive_rcm(rseed_4);
+    let otag_4 = hash::owner_tag(auth_root_4, auth_pub_seed_4, nk_tag_4);
+    assert(
+        hash::commit(d_j_4, v_4, asset_4, rcm_4, otag_4) == cm_4,
+        'transfer: bad cm_4',
+    );
+
+    assert(v_4 > 0_u64, 'transfer prod fee');
 
     // Tally outputs into the per-asset accumulators.
-    let mut tez_out: u128 = v_3.into(); // asset_3 == ASSET_TEZ
+    let mut tez_out: u128 = v_4.into(); // asset_4 == ASSET_TEZ (producer)
     let mut primary_out: u128 = 0;
     if asset_1 == ASSET_TEZ {
         tez_out += v_1.into();
@@ -214,6 +241,11 @@ pub fn verify(
         tez_out += v_2.into();
     } else {
         primary_out += v_2.into();
+    }
+    if asset_3 == ASSET_TEZ {
+        tez_out += v_3.into();
+    } else {
+        primary_out += v_3.into();
     }
 
     // Per-asset balance: tez accumulator covers the public fee, the
@@ -232,9 +264,11 @@ pub fn verify(
     outputs.append(cm_1);
     outputs.append(cm_2);
     outputs.append(cm_3);
+    outputs.append(cm_4);
     outputs.append(memo_ct_hash_1);
     outputs.append(memo_ct_hash_2);
     outputs.append(memo_ct_hash_3);
+    outputs.append(memo_ct_hash_4);
     outputs
 }
 
@@ -287,11 +321,21 @@ mod tests {
         auth_pub_seed_3: felt252,
         nk_tag_3: felt252,
         memo_ct_hash_3: felt252,
+        // Phase C: 4th output (producer fee).
+        cm_4: felt252,
+        d_j_4: felt252,
+        v_4: u64,
+        rseed_4: felt252,
+        auth_root_4: felt252,
+        auth_pub_seed_4: felt252,
+        nk_tag_4: felt252,
+        memo_ct_hash_4: felt252,
         // Multiasset Phase B
         input_asset_list: Array<felt252>,
         asset_1: felt252,
         asset_2: felt252,
         asset_3: felt252,
+        asset_4: felt252,
         primary_non_tez_asset: felt252,
     }
 
@@ -382,9 +426,11 @@ mod tests {
         cm_1: felt252,
         cm_2: felt252,
         cm_3: felt252,
+        cm_4: felt252,
         memo_ct_hash_1: felt252,
         memo_ct_hash_2: felt252,
         memo_ct_hash_3: felt252,
+        memo_ct_hash_4: felt252,
     ) -> felt252 {
         let mut sighash = hash::sighash_fold(0x01, auth_domain);
         sighash = hash::sighash_fold(sighash, root);
@@ -397,9 +443,11 @@ mod tests {
         sighash = hash::sighash_fold(sighash, cm_1);
         sighash = hash::sighash_fold(sighash, cm_2);
         sighash = hash::sighash_fold(sighash, cm_3);
+        sighash = hash::sighash_fold(sighash, cm_4);
         sighash = hash::sighash_fold(sighash, memo_ct_hash_1);
         sighash = hash::sighash_fold(sighash, memo_ct_hash_2);
         sighash = hash::sighash_fold(sighash, memo_ct_hash_3);
+        sighash = hash::sighash_fold(sighash, memo_ct_hash_4);
         sighash
     }
 
@@ -425,9 +473,11 @@ mod tests {
         cm_1: felt252,
         cm_2: felt252,
         cm_3: felt252,
+        cm_4: felt252,
         memo_ct_hash_1: felt252,
         memo_ct_hash_2: felt252,
         memo_ct_hash_3: felt252,
+        memo_ct_hash_4: felt252,
         auth_pub_seed: felt252,
         auth_idx: u32,
     ) -> Array<felt252> {
@@ -439,13 +489,20 @@ mod tests {
             cm_1,
             cm_2,
             cm_3,
+            cm_4,
             memo_ct_hash_1,
             memo_ct_hash_2,
             memo_ct_hash_3,
+            memo_ct_hash_4,
         );
         sign_transfer_input(sighash, auth_pub_seed, auth_idx, 0x7500)
     }
 
+    // Phase C: function still accepts (v_in, v_1, v_2, v_3, fee) where v_3
+    // is the producer-fee amount (now at output slot 4). The new change_2
+    // slot at output position 3 is hardcoded to a zero-value note
+    // (asset = tez), keeping the existing test invariants intact while
+    // the layout changes to N→4.
     fn build_fixture_with_values_and_fee(
         v_in: u64, v_1: u64, v_2: u64, v_3: u64, fee: u64,
     ) -> TransferFixture {
@@ -509,13 +566,27 @@ mod tests {
         let memo_ct_hash_2 = 0x7906;
         let cm_2 = output_commitment(d_j_2, v_2, rseed_2, auth_root_2, auth_pub_seed_2, nk_tag_2);
 
-        let d_j_3 = 0x7A01;
-        let rseed_3 = 0x7A02;
-        let auth_root_3 = 0x7A03;
-        let auth_pub_seed_3 = 0x7A04;
-        let nk_tag_3 = 0x7A05;
-        let memo_ct_hash_3 = 0x7A06;
-        let cm_3 = output_commitment(d_j_3, v_3, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3);
+        // Phase C: cm_3 is now change_2 (zero-value pure-tez note).
+        let d_j_3 = 0x7AC1;
+        let rseed_3 = 0x7AC2;
+        let auth_root_3 = 0x7AC3;
+        let auth_pub_seed_3 = 0x7AC4;
+        let nk_tag_3 = 0x7AC5;
+        let memo_ct_hash_3 = 0x7AC6;
+        let v_3_change_2: u64 = 0;
+        let cm_3 = output_commitment(
+            d_j_3, v_3_change_2, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3,
+        );
+
+        // cm_4 is the producer-fee note (formerly cm_3). The producer-fee
+        // amount is the original `v_3` parameter.
+        let d_j_4 = 0x7A01;
+        let rseed_4 = 0x7A02;
+        let auth_root_4 = 0x7A03;
+        let auth_pub_seed_4 = 0x7A04;
+        let nk_tag_4 = 0x7A05;
+        let memo_ct_hash_4 = 0x7A06;
+        let cm_4 = output_commitment(d_j_4, v_3, rseed_4, auth_root_4, auth_pub_seed_4, nk_tag_4);
 
         let wots_sig_flat = sign_transfer_statement(
             auth_domain,
@@ -525,9 +596,11 @@ mod tests {
             cm_1,
             cm_2,
             cm_3,
+            cm_4,
             memo_ct_hash_1,
             memo_ct_hash_2,
             memo_ct_hash_3,
+            memo_ct_hash_4,
             auth_pub_seed,
             auth_idx,
         );
@@ -566,17 +639,27 @@ mod tests {
             memo_ct_hash_2,
             cm_3,
             d_j_3,
-            v_3,
+            v_3: v_3_change_2,
             rseed_3,
             auth_root_3,
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            // Phase C: 4th output (producer fee, v_3 from param).
+            cm_4,
+            d_j_4,
+            v_4: v_3,
+            rseed_4,
+            auth_root_4,
+            auth_pub_seed_4,
+            nk_tag_4,
+            memo_ct_hash_4,
             // Multiasset Phase B: pure-tez fixture.
             input_asset_list: array![ASSET_TEZ],
             asset_1: ASSET_TEZ,
             asset_2: ASSET_TEZ,
             asset_3: ASSET_TEZ,
+            asset_4: ASSET_TEZ,
             primary_non_tez_asset: ASSET_TEZ,
         }
     }
@@ -696,13 +779,25 @@ mod tests {
         let memo_ct_hash_2 = 0x8F06;
         let cm_2 = output_commitment(d_j_2, v_2, rseed_2, auth_root_2, auth_pub_seed_2, nk_tag_2);
 
-        let d_j_3 = 0x9001;
-        let rseed_3 = 0x9002;
-        let auth_root_3 = 0x9003;
-        let auth_pub_seed_3 = 0x9004;
-        let nk_tag_3 = 0x9005;
-        let memo_ct_hash_3 = 0x9006;
-        let cm_3 = output_commitment(d_j_3, v_3, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3);
+        // Phase C: cm_3 = change_2 (zero-value tez), cm_4 = producer fee.
+        let d_j_3 = 0x90C1;
+        let rseed_3 = 0x90C2;
+        let auth_root_3 = 0x90C3;
+        let auth_pub_seed_3 = 0x90C4;
+        let nk_tag_3 = 0x90C5;
+        let memo_ct_hash_3 = 0x90C6;
+        let v_3_change_2: u64 = 0;
+        let cm_3 = output_commitment(
+            d_j_3, v_3_change_2, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3,
+        );
+
+        let d_j_4 = 0x9001;
+        let rseed_4 = 0x9002;
+        let auth_root_4 = 0x9003;
+        let auth_pub_seed_4 = 0x9004;
+        let nk_tag_4 = 0x9005;
+        let memo_ct_hash_4 = 0x9006;
+        let cm_4 = output_commitment(d_j_4, v_3, rseed_4, auth_root_4, auth_pub_seed_4, nk_tag_4);
 
         let nf_list: Array<felt252> = array![nf_0, nf_1];
         let sighash = transfer_sighash(
@@ -713,9 +808,11 @@ mod tests {
             cm_1,
             cm_2,
             cm_3,
+            cm_4,
             memo_ct_hash_1,
             memo_ct_hash_2,
             memo_ct_hash_3,
+            memo_ct_hash_4,
         );
 
         let sig_0 = sign_transfer_input(sighash, auth_pub_seed, auth_idx_0, key_base_0);
@@ -790,17 +887,26 @@ mod tests {
             memo_ct_hash_2,
             cm_3,
             d_j_3,
-            v_3,
+            v_3: v_3_change_2,
             rseed_3,
             auth_root_3,
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            cm_4,
+            d_j_4,
+            v_4: v_3,
+            rseed_4,
+            auth_root_4,
+            auth_pub_seed_4,
+            nk_tag_4,
+            memo_ct_hash_4,
             // Multiasset Phase B: pure-tez 2-input fixture.
             input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
             asset_1: ASSET_TEZ,
             asset_2: ASSET_TEZ,
             asset_3: ASSET_TEZ,
+            asset_4: ASSET_TEZ,
             primary_non_tez_asset: ASSET_TEZ,
         }
     }
@@ -1103,13 +1209,25 @@ mod tests {
         let memo_ct_hash_2 = 0xA806;
         let cm_2 = output_commitment(d_j_2, v_2, rseed_2, auth_root_2, auth_pub_seed_2, nk_tag_2);
 
-        let d_j_3 = 0xA901;
-        let rseed_3 = 0xA902;
-        let auth_root_3 = 0xA903;
-        let auth_pub_seed_3 = 0xA904;
-        let nk_tag_3 = 0xA905;
-        let memo_ct_hash_3 = 0xA906;
-        let cm_3 = output_commitment(d_j_3, v_3, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3);
+        // Phase C: cm_3 = zero-value tez change_2, cm_4 = producer fee.
+        let d_j_3 = 0xA9C1;
+        let rseed_3 = 0xA9C2;
+        let auth_root_3 = 0xA9C3;
+        let auth_pub_seed_3 = 0xA9C4;
+        let nk_tag_3 = 0xA9C5;
+        let memo_ct_hash_3 = 0xA9C6;
+        let v_3_change_2: u64 = 0;
+        let cm_3 = output_commitment(
+            d_j_3, v_3_change_2, rseed_3, auth_root_3, auth_pub_seed_3, nk_tag_3,
+        );
+
+        let d_j_4 = 0xA901;
+        let rseed_4 = 0xA902;
+        let auth_root_4 = 0xA903;
+        let auth_pub_seed_4 = 0xA904;
+        let nk_tag_4 = 0xA905;
+        let memo_ct_hash_4 = 0xA906;
+        let cm_4 = output_commitment(d_j_4, v_3, rseed_4, auth_root_4, auth_pub_seed_4, nk_tag_4);
 
         let sighash = transfer_sighash(
             auth_domain,
@@ -1119,9 +1237,11 @@ mod tests {
             cm_1,
             cm_2,
             cm_3,
+            cm_4,
             memo_ct_hash_1,
             memo_ct_hash_2,
             memo_ct_hash_3,
+            memo_ct_hash_4,
         );
         let mut wots_sig_flat: Array<felt252> = array![];
         let mut m: u32 = 0;
@@ -1178,16 +1298,25 @@ mod tests {
             memo_ct_hash_2,
             cm_3,
             d_j_3,
-            v_3,
+            v_3: v_3_change_2,
             rseed_3,
             auth_root_3,
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            cm_4,
+            d_j_4,
+            v_4: v_3,
+            rseed_4,
+            auth_root_4,
+            auth_pub_seed_4,
+            nk_tag_4,
+            memo_ct_hash_4,
             input_asset_list,
             asset_1: ASSET_TEZ,
             asset_2: ASSET_TEZ,
             asset_3: ASSET_TEZ,
+            asset_4: ASSET_TEZ,
             primary_non_tez_asset: ASSET_TEZ,
         }
     }
@@ -1202,9 +1331,11 @@ mod tests {
             base.cm_1,
             base.cm_2,
             base.cm_3,
+            base.cm_4,
             base.memo_ct_hash_1,
             base.memo_ct_hash_2,
             base.memo_ct_hash_3,
+            base.memo_ct_hash_4,
         );
         let sig = sign_transfer_input(
             sighash,
@@ -1292,11 +1423,20 @@ mod tests {
             auth_pub_seed_3: base.auth_pub_seed_3,
             nk_tag_3: base.nk_tag_3,
             memo_ct_hash_3: base.memo_ct_hash_3,
+            cm_4: base.cm_4,
+            d_j_4: base.d_j_4,
+            v_4: base.v_4,
+            rseed_4: base.rseed_4,
+            auth_root_4: base.auth_root_4,
+            auth_pub_seed_4: base.auth_pub_seed_4,
+            nk_tag_4: base.nk_tag_4,
+            memo_ct_hash_4: base.memo_ct_hash_4,
             // Multiasset Phase B: pure-tez duplicate-nf fixture (2 inputs).
             input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
             asset_1: ASSET_TEZ,
             asset_2: ASSET_TEZ,
             asset_3: ASSET_TEZ,
+            asset_4: ASSET_TEZ,
             primary_non_tez_asset: ASSET_TEZ,
         }
     }
@@ -1310,6 +1450,7 @@ mod tests {
             fixture.cm_1,
             fixture.cm_2,
             fixture.cm_3,
+            fixture.cm_4,
             fixture.nk_spend_list.span(),
             fixture.auth_root_list.span(),
             fixture.auth_pub_seed_list.span(),
@@ -1346,6 +1487,14 @@ mod tests {
             fixture.nk_tag_3,
             fixture.memo_ct_hash_3,
             fixture.asset_3,
+            fixture.d_j_4,
+            fixture.v_4,
+            fixture.rseed_4,
+            fixture.auth_root_4,
+            fixture.auth_pub_seed_4,
+            fixture.nk_tag_4,
+            fixture.memo_ct_hash_4,
+            fixture.asset_4,
             fixture.primary_non_tez_asset,
         )
     }
@@ -1354,7 +1503,8 @@ mod tests {
     fn test_transfer_accepts_valid_statement() {
         let fixture = build_fixture();
         let outputs = run_verify(@fixture);
-        assert(outputs.len() == 10, 'transfer outputs len');
+        // Phase C: outputs now have 4 cm's + 4 memos = +2 vs prior layout.
+        assert(outputs.len() == 12, 'transfer outputs len');
         assert(*outputs.at(0) == fixture.auth_domain, 'transfer out domain');
         assert(*outputs.at(1) == fixture.root, 'transfer out root');
         assert(*outputs.at(2) == *fixture.nf_list.at(0), 'transfer out nf');
@@ -1362,16 +1512,19 @@ mod tests {
         assert(*outputs.at(4) == fixture.cm_1, 'transfer out cm1');
         assert(*outputs.at(5) == fixture.cm_2, 'transfer out cm2');
         assert(*outputs.at(6) == fixture.cm_3, 'transfer out cm3');
-        assert(*outputs.at(7) == fixture.memo_ct_hash_1, 'transfer out memo1');
-        assert(*outputs.at(8) == fixture.memo_ct_hash_2, 'transfer out memo2');
-        assert(*outputs.at(9) == fixture.memo_ct_hash_3, 'transfer out memo3');
+        assert(*outputs.at(7) == fixture.cm_4, 'transfer out cm4');
+        assert(*outputs.at(8) == fixture.memo_ct_hash_1, 'transfer out memo1');
+        assert(*outputs.at(9) == fixture.memo_ct_hash_2, 'transfer out memo2');
+        assert(*outputs.at(10) == fixture.memo_ct_hash_3, 'transfer out memo3');
+        assert(*outputs.at(11) == fixture.memo_ct_hash_4, 'transfer out memo4');
     }
 
     #[test]
     fn test_transfer_accepts_valid_two_input_statement() {
         let fixture = build_two_input_fixture();
         let outputs = run_verify(@fixture);
-        assert(outputs.len() == 11, 'transfer outputs len two input');
+        // Phase C: +2 vs prior layout (4 cms + 4 memos).
+        assert(outputs.len() == 13, 'transfer outputs len two input');
         assert(*outputs.at(0) == fixture.auth_domain, 'transfer2 out domain');
         assert(*outputs.at(1) == fixture.root, 'transfer2 out root');
         assert(*outputs.at(2) == *fixture.nf_list.at(0), 'transfer2 out nf0');
@@ -1380,12 +1533,15 @@ mod tests {
         assert(*outputs.at(5) == fixture.cm_1, 'transfer2 out cm1');
         assert(*outputs.at(6) == fixture.cm_2, 'transfer2 out cm2');
         assert(*outputs.at(7) == fixture.cm_3, 'transfer2 out cm3');
+        assert(*outputs.at(8) == fixture.cm_4, 'transfer2 out cm4');
     }
 
     fn assert_transfer_accepts_multi_input_statement(n_inputs: u32) {
         let fixture = build_multi_input_fixture(n_inputs);
         let outputs = run_verify(@fixture);
-        assert(outputs.len() == n_inputs + 9_u32, 'transfer outputs len multi');
+        // Phase C: N nf + 1 (fee) + 4 cm + 4 memo + 2 (auth_domain, root)
+        // = N + 11. Old was N + 9.
+        assert(outputs.len() == n_inputs + 11_u32, 'transfer outputs len multi');
         assert(*outputs.at(0) == fixture.auth_domain, 'transfer multi out domain');
         assert(*outputs.at(1) == fixture.root, 'transfer multi out root');
         assert(*outputs.at(2) == *fixture.nf_list.at(0), 'transfer multi out nf0');
@@ -1397,6 +1553,7 @@ mod tests {
         assert(*outputs.at(3_u32 + n_inputs) == fixture.cm_1, 'transfer multi out cm1');
         assert(*outputs.at(4_u32 + n_inputs) == fixture.cm_2, 'transfer multi out cm2');
         assert(*outputs.at(5_u32 + n_inputs) == fixture.cm_3, 'transfer multi out cm3');
+        assert(*outputs.at(6_u32 + n_inputs) == fixture.cm_4, 'transfer multi out cm4');
     }
 
     #[test]
@@ -1428,9 +1585,11 @@ mod tests {
                     fixture.cm_1,
                     fixture.cm_2,
                     fixture.cm_3,
+                    fixture.cm_4,
                     fixture.memo_ct_hash_1,
                     fixture.memo_ct_hash_2,
                     fixture.memo_ct_hash_3,
+                    fixture.memo_ct_hash_4,
                     *fixture.auth_pub_seed_list.at(0),
                     *fixture.auth_index_list.at(0),
                 );

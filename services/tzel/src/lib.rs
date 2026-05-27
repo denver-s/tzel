@@ -1337,9 +1337,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh,
             &mh,
             &mh_3,
+            &mh_3
         );
 
         // Unshield with same values (treating cm_1 as v_pub felt, cm_2 as recipient, etc.)
@@ -1383,9 +1385,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh,
             &mh,
             &mh_3,
+            &mh_3
         );
         let sh_b = transfer_sighash(
             &auth_domain_b,
@@ -1395,9 +1399,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh,
             &mh,
             &mh_3,
+            &mh_3
         );
 
         assert_ne!(
@@ -1837,9 +1843,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh_1,
             &mh_2,
             &mh_3,
+            &mh_3
         );
         assert_ne!(sh, ZERO, "transfer_sighash must not be zero");
         // Pin the value — any mutation that changes the fold will break this
@@ -1854,9 +1862,11 @@ mod tests {
             &cm_1,
             &cm_2,
             &cm_3,
+            &cm_3,
             &mh_1,
             &mh_2,
             &mh_3,
+            &mh_3
         );
         assert_eq!(sh, sh2, "sighash must be deterministic");
 
@@ -1869,9 +1879,11 @@ mod tests {
             &cm_2,
             &cm_1,
             &cm_3,
+            &cm_3,
             &mh_1,
             &mh_2,
             &mh_3,
+            &mh_3
         );
         assert_ne!(sh, sh3, "swapping cm_1/cm_2 must change sighash");
 

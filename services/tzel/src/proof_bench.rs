@@ -270,9 +270,11 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
         &cm_1,
         &cm_2,
         &cm_3,
+        &cm_3,
         &mh_1,
         &mh_2,
         &mh_3,
+        &mh_3
     );
 
     let mut cm_paths = Vec::with_capacity(n_inputs);

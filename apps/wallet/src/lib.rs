@@ -8093,9 +8093,11 @@ fn cmd_transfer(
             &note_1.cm,
             &note_2.cm,
             &note_3.cm,
+            &note_3.cm,
             &note_1.mh,
             &note_2.mh,
             &note_3.mh,
+            &note_3.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -8830,9 +8832,11 @@ fn cmd_transfer_rollup(
             &note_1.cm,
             &note_2.cm,
             &note_3.cm,
+            &note_3.cm,
             &note_1.mh,
             &note_2.mh,
             &note_3.mh,
+            &note_3.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];

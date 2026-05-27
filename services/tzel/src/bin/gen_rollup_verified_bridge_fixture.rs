@@ -463,9 +463,11 @@ fn generate_transfer_proof(
         &cm_1,
         &cm_2,
         &cm_3,
+        &cm_3,
         &mh_1,
         &mh_2,
         &mh_3,
+        &mh_3
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, input_auth_idx, &sighash);
 
