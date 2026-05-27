@@ -3,7 +3,7 @@ use tzel_core::{
     derive_auth_pub_seed, derive_nk_tag, derive_rcm, felt_tag, hash, hash_two, nullifier,
     owner_tag, shield_sighash, transfer_sighash, u64_to_felt, unshield_sighash, wots_pk,
     wots_pk_to_leaf, wots_sign, xmss_tree_node_hash, Account, CircuitKind, MerkleTree,
-    AUTH_DEPTH, AUTH_TREE_SIZE, DEPTH, F, MIN_TX_FEE, WOTS_CHAINS,
+    ASSET_TEZ, AUTH_DEPTH, AUTH_TREE_SIZE, DEPTH, F, MIN_TX_FEE, WOTS_CHAINS,
 };
 
 pub const MAX_BENCH_INPUTS: usize = 7;
@@ -112,9 +112,9 @@ pub fn build_shield_bench_witness() -> BenchWitness {
     let cm_new = commit(
         &d_j,
         v_note,
+        &ASSET_TEZ,
         &derive_rcm(&rseed),
-        &owner_tag(&auth_root, &auth_pub_seed, &nk_tag),
-    );
+        &owner_tag(&auth_root, &auth_pub_seed, &nk_tag));
 
     // Producer note has its own independent owner witness; the circuit
     // only checks the commitment opens correctly.
@@ -123,9 +123,9 @@ pub fn build_shield_bench_witness() -> BenchWitness {
     let cm_producer = commit(
         &producer_d_j,
         producer_fee,
+        &ASSET_TEZ,
         &derive_rcm(&producer_rseed),
-        &owner_tag(&producer_auth_root, &producer_auth_pub_seed, &producer_nk_tag),
-    );
+        &owner_tag(&producer_auth_root, &producer_auth_pub_seed, &producer_nk_tag));
     let mh_recipient = hash_two(&felt_tag(b"bench-mh-recipient"), &u64_to_felt(0));
 
     let sighash = shield_sighash(
@@ -209,7 +209,7 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     for i in 0..n_inputs {
         let value = 200_000 + 10_000 * i as u64;
         let rseed = bench_rseed(b"bench-tr-in", i);
-        let cm = commit(&d_j, value, &derive_rcm(&rseed), &otag);
+        let cm = commit(&d_j, value, &ASSET_TEZ, &derive_rcm(&rseed), &otag);
         tree.append(cm);
         cms.push(cm);
         values.push(value);
@@ -237,21 +237,21 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     let cm_1 = commit(
         &d_j_1,
         v_1,
+        &ASSET_TEZ,
         &derive_rcm(&rseed_1),
-        &owner_tag(&auth_root_1, &auth_pub_seed_1, &nk_tag_1),
-    );
+        &owner_tag(&auth_root_1, &auth_pub_seed_1, &nk_tag_1));
     let cm_2 = commit(
         &d_j_2,
         v_2,
+        &ASSET_TEZ,
         &derive_rcm(&rseed_2),
-        &owner_tag(&auth_root_2, &auth_pub_seed_2, &nk_tag_2),
-    );
+        &owner_tag(&auth_root_2, &auth_pub_seed_2, &nk_tag_2));
     let cm_3 = commit(
         &d_j_3,
         producer_fee,
+        &ASSET_TEZ,
         &derive_rcm(&rseed_3),
-        &owner_tag(&auth_root_3, &auth_pub_seed_3, &nk_tag_3),
-    );
+        &owner_tag(&auth_root_3, &auth_pub_seed_3, &nk_tag_3));
 
     let auth_domain = u64_to_felt(0xF001);
     let fee = MIN_TX_FEE;
@@ -371,7 +371,7 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     for i in 0..n_inputs {
         let value = 210_000 + 10_000 * i as u64;
         let rseed = bench_rseed(b"bench-un-in", i);
-        let cm = commit(&d_j, value, &derive_rcm(&rseed), &otag);
+        let cm = commit(&d_j, value, &ASSET_TEZ, &derive_rcm(&rseed), &otag);
         tree.append(cm);
         cms.push(cm);
         values.push(value);
@@ -404,17 +404,17 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     let cm_change = commit(
         &d_j_change,
         v_change,
+        &ASSET_TEZ,
         &derive_rcm(&rseed_change),
-        &owner_tag(&auth_root_change, &auth_pub_seed_change, &nk_tag_change),
-    );
+        &owner_tag(&auth_root_change, &auth_pub_seed_change, &nk_tag_change));
     let (d_j_fee, auth_root_fee, auth_pub_seed_fee, nk_tag_fee, mh_fee, rseed_fee) =
         synthetic_output_fields(0xF300);
     let cm_fee = commit(
         &d_j_fee,
         producer_fee,
+        &ASSET_TEZ,
         &derive_rcm(&rseed_fee),
-        &owner_tag(&auth_root_fee, &auth_pub_seed_fee, &nk_tag_fee),
-    );
+        &owner_tag(&auth_root_fee, &auth_pub_seed_fee, &nk_tag_fee));
     let sighash = unshield_sighash(
         &auth_domain,
         &root,

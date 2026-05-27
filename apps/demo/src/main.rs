@@ -52,6 +52,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 type F = [u8; 32];
 const ZERO: F = [0u8; 32];
 
+/// Canonical tez asset tag. Multiasset commitments bind an asset field
+/// inside the commitment hash; `0` is reserved for tez.
+const ASSET_TEZ: F = ZERO;
+
 /// Detection tag precision: 10-bit tag → ~1/1024 false positive rate.
 const DETECT_K: usize = 10;
 const MAX_VALID_ROOTS: usize = 4096;
@@ -139,13 +143,14 @@ fn owner_tag(ak: &F, nk_tag: &F) -> F {
     blake2s(b"ownrSP__", &buf)
 }
 
-/// Note commitment: cm = H_commit(d_j, v, rcm, owner_tag_j).
-fn commit(d_j: &F, v: u64, rcm: &F, otag: &F) -> F {
-    let mut buf = [0u8; 128];
+/// Note commitment: cm = H_commit(d_j, v, asset, rcm, owner_tag_j).
+fn commit(d_j: &F, v: u64, asset: &F, rcm: &F, otag: &F) -> F {
+    let mut buf = [0u8; 160];
     buf[..32].copy_from_slice(d_j);
     buf[32..40].copy_from_slice(&v.to_le_bytes());
-    buf[64..96].copy_from_slice(rcm);
-    buf[96..128].copy_from_slice(otag);
+    buf[64..96].copy_from_slice(asset);
+    buf[96..128].copy_from_slice(rcm);
+    buf[128..160].copy_from_slice(otag);
     hash_commit_raw(&buf)
 }
 
@@ -580,7 +585,7 @@ impl Wallet {
                 let nk_sp = derive_nk_spend(&self.account.nk, &d_j);
                 let nk_tg = derive_nk_tag(&nk_sp);
                 let otag = owner_tag(&ak, &nk_tg);
-                if &commit(&d_j, v, &rcm, &otag) == cm {
+                if &commit(&d_j, v, &ASSET_TEZ, &rcm, &otag) == cm {
                     let index = chain.tree.leaves.iter().position(|l| l == cm).unwrap();
                     self.notes.push(Note {
                         nk_spend: nk_sp,
@@ -714,7 +719,7 @@ impl Chain {
         let rseed: F = rng.random();
         let rcm = derive_rcm(&rseed);
         let otag = owner_tag(ak, nk_tag);
-        let cm = commit(d_j, v, &rcm, &otag);
+        let cm = commit(d_j, v, &ASSET_TEZ, &rcm, &otag);
         *self.balances.get_mut(sender).unwrap() -= v;
         let index = self.tree.append(cm);
         self.snapshot_root();
@@ -781,7 +786,7 @@ impl Chain {
             let rseed: F = rng.random();
             let rcm = derive_rcm(&rseed);
             let otag = owner_tag(ak, nk_tag);
-            let cm = commit(d_j, v_change as u64, &rcm, &otag);
+            let cm = commit(d_j, v_change as u64, &ASSET_TEZ, &rcm, &otag);
             let index = self.tree.append(cm);
             self.post_note(cm, encrypt_note(v_change as u64, &rseed, None, ek_v, ek_d));
             println!(
@@ -878,7 +883,7 @@ impl Chain {
             let rseed: F = rng.random();
             let rcm = derive_rcm(&rseed);
             let otag = owner_tag(ak, nkt);
-            let cm = commit(d, v, &rcm, &otag);
+            let cm = commit(d, v, &ASSET_TEZ, &rcm, &otag);
             let index = self.tree.append(cm);
             self.post_note(cm, encrypt_note(v, &rseed, memo, ev, ed));
             println!("    output cm={} v={} index={}", short(&cm), v, index);
@@ -1233,7 +1238,7 @@ mod tests {
         let nk_sp = derive_nk_spend(&acc.nk, &d_j);
         let nk_tg = derive_nk_tag(&nk_sp);
         let otag = owner_tag(&ak, &nk_tg);
-        let cm = commit(&d_j, 100, &rcm, &otag);
+        let cm = commit(&d_j, 100, &ASSET_TEZ, &rcm, &otag);
         // Same inputs → same nullifier.
         assert_eq!(nullifier(&nk_sp, &cm, 0), nullifier(&nk_sp, &cm, 0));
         // Different nk_spend → different nullifier.
@@ -1264,7 +1269,7 @@ mod tests {
         rseed[0] = 0x01;
         rseed[1] = 0x10;
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&d_j, 1000, &rcm, &otag);
+        let cm = commit(&d_j, 1000, &ASSET_TEZ, &rcm, &otag);
         let nf = nullifier(&nk_sp, &cm, 0); // position 0
 
         // Expected values from Cairo execution (nk, ak, d_j unchanged from v2).

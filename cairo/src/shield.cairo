@@ -26,6 +26,7 @@
 
 use tzel::blake_hash as hash;
 use tzel::{merkle, xmss_common};
+use tzel::ASSET_TEZ;
 
 pub fn verify(
     auth_domain: felt252,
@@ -65,14 +66,18 @@ pub fn verify(
     // Recipient commitment.
     let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
     let rcm = hash::derive_rcm(rseed);
-    assert(hash::commit(d_j, v_note, rcm, otag) == cm_new, 'shield: bad commitment');
+    assert(
+        hash::commit(d_j, v_note, ASSET_TEZ, rcm, otag) == cm_new,
+        'shield: bad commitment',
+    );
 
     // Producer-fee commitment.
     let producer_otag =
         hash::owner_tag(producer_auth_root, producer_auth_pub_seed, producer_nk_tag);
     let producer_rcm = hash::derive_rcm(producer_rseed);
     assert(
-        hash::commit(producer_d_j, producer_fee, producer_rcm, producer_otag) == cm_producer,
+        hash::commit(producer_d_j, producer_fee, ASSET_TEZ, producer_rcm, producer_otag)
+            == cm_producer,
         'shield: bad producer cm',
     );
     assert(producer_fee > 0_u64, 'shield: producer fee zero');
@@ -129,6 +134,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use tzel::{blake_hash as hash, merkle, xmss_common};
+    use tzel::ASSET_TEZ;
     use super::verify;
 
     const TAG_XMSS_TREE_TEST: felt252 = 0x72742D73736D78;
@@ -219,7 +225,7 @@ mod tests {
     ) -> felt252 {
         let rcm = hash::derive_rcm(rseed);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
-        hash::commit(d_j, v, rcm, otag)
+        hash::commit(d_j, v, ASSET_TEZ, rcm, otag)
     }
 
     fn deposit_pubkey_hash(

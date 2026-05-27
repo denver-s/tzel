@@ -12,6 +12,7 @@
 
 use tzel::blake_hash as hash;
 use tzel::{merkle, xmss_common};
+use tzel::ASSET_TEZ;
 
 const MAX_INPUTS: u32 = 7;
 
@@ -101,7 +102,7 @@ pub fn verify(
         let nk_tag = hash::derive_nk_tag(nk_spend);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
         let rcm = hash::derive_rcm(rseed);
-        let cm = hash::commit(d_j, v, rcm, otag);
+        let cm = hash::commit(d_j, v, ASSET_TEZ, rcm, otag);
 
         let cm_sib_start = i * merkle::TREE_DEPTH;
         merkle::verify(
@@ -133,15 +134,24 @@ pub fn verify(
 
     let rcm_1 = hash::derive_rcm(rseed_1);
     let otag_1 = hash::owner_tag(auth_root_1, auth_pub_seed_1, nk_tag_1);
-    assert(hash::commit(d_j_1, v_1, rcm_1, otag_1) == cm_1, 'transfer: bad cm_1');
+    assert(
+        hash::commit(d_j_1, v_1, ASSET_TEZ, rcm_1, otag_1) == cm_1,
+        'transfer: bad cm_1',
+    );
 
     let rcm_2 = hash::derive_rcm(rseed_2);
     let otag_2 = hash::owner_tag(auth_root_2, auth_pub_seed_2, nk_tag_2);
-    assert(hash::commit(d_j_2, v_2, rcm_2, otag_2) == cm_2, 'transfer: bad cm_2');
+    assert(
+        hash::commit(d_j_2, v_2, ASSET_TEZ, rcm_2, otag_2) == cm_2,
+        'transfer: bad cm_2',
+    );
 
     let rcm_3 = hash::derive_rcm(rseed_3);
     let otag_3 = hash::owner_tag(auth_root_3, auth_pub_seed_3, nk_tag_3);
-    assert(hash::commit(d_j_3, v_3, rcm_3, otag_3) == cm_3, 'transfer: bad cm_3');
+    assert(
+        hash::commit(d_j_3, v_3, ASSET_TEZ, rcm_3, otag_3) == cm_3,
+        'transfer: bad cm_3',
+    );
 
     assert(v_3 > 0_u64, 'transfer prod fee');
     let sum_out: u128 = v_1.into() + v_2.into() + v_3.into() + fee.into();
@@ -166,6 +176,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use tzel::{blake_hash as hash, merkle, xmss_common};
+    use tzel::ASSET_TEZ;
     use super::verify;
 
     const TAG_XMSS_TREE_TEST: felt252 = 0x72742D73736D78;
@@ -289,7 +300,7 @@ mod tests {
     ) -> felt252 {
         let rcm = hash::derive_rcm(rseed);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
-        hash::commit(d_j, v, rcm, otag)
+        hash::commit(d_j, v, ASSET_TEZ, rcm, otag)
     }
 
     fn transfer_sighash(

@@ -136,7 +136,7 @@ fn derive_scenario_address(acc: &Account, j: u32) -> DerivedScenarioAddress {
 fn commit_for_address(address: &PaymentAddress, v: u64, rseed: &F) -> F {
     let rcm = derive_rcm(rseed);
     let otag = owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag);
-    commit(&address.d_j, v, &rcm, &otag)
+    commit(&address.d_j, v, &ASSET_TEZ, &rcm, &otag)
 }
 
 fn deterministic_note(

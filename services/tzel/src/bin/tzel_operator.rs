@@ -20,7 +20,7 @@ use tezos_smart_rollup_encoding::{inbox::ExternalMessageFrame, smart_rollup::Sma
 #[cfg(any(test, debug_assertions))]
 use tzel_core::{auth_leaf_hash, derive_auth_pub_seed};
 use tzel_core::{
-    commit, decrypt_memo, derive_kem_keys, derive_rcm, detect, hash,
+    commit, decrypt_memo, derive_kem_keys, derive_rcm, detect, hash, ASSET_TEZ,
     kernel_wire::{
         decode_kernel_inbox_message, encode_kernel_inbox_message, kernel_bridge_config_sighash,
         kernel_verifier_config_sighash, KernelDalChunkPointer, KernelDalPayloadKind,
@@ -535,7 +535,7 @@ fn validate_fee_note_against_policy(
         &policy.address.auth_pub_seed,
         &policy.address.nk_tag,
     );
-    let expected = commit(&policy.address.d_j, value, &rcm, &otag);
+    let expected = commit(&policy.address.d_j, value, &ASSET_TEZ, &rcm, &otag);
     if &expected != commitment {
         return Err(
             "DAL fee note commitment does not match the configured operator fee address".into(),
@@ -1562,7 +1562,7 @@ mod tests {
             &policy.address.auth_pub_seed,
             &policy.address.nk_tag,
         );
-        let cm = commit(&policy.address.d_j, policy.amount, &rcm, &otag);
+        let cm = commit(&policy.address.d_j, policy.amount, &ASSET_TEZ, &rcm, &otag);
         (enc, cm)
     }
 

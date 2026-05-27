@@ -765,7 +765,7 @@ impl WalletFile {
         let nk_tg = derive_nk_tag(&nk_sp);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rcm = derive_rcm(&rseed);
-        if commit(&addr.d_j, v, &rcm, &otag) != cm {
+        if commit(&addr.d_j, v, &ASSET_TEZ, &rcm, &otag) != cm {
             return None;
         }
         Some(Note {
@@ -1071,7 +1071,7 @@ fn view_record_for_note(
         };
         let rcm = derive_rcm(&rseed);
         let owner = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &addr.nk_tag);
-        if commit(&addr.d_j, value, &rcm, &owner) != nm.cm {
+        if commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &owner) != nm.cm {
             continue;
         }
         return Some(ViewedNoteRecord {
@@ -2840,7 +2840,7 @@ fn build_output_note_inner(
     )
     .map_err(|_| "invalid ek_d")?;
     let otag = owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag);
-    let cm = commit(&address.d_j, value, &rcm, &otag);
+    let cm = commit(&address.d_j, value, &ASSET_TEZ, &rcm, &otag);
     let mut enc = encrypt_note(value, &rseed, memo, &ek_v, &ek_d);
     if let Some((outgoing_seed, role)) = outgoing {
         let recovery = outgoing_recovery_plaintext(address, role, value, rseed);
@@ -5144,7 +5144,7 @@ mod tests {
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rseed = random_felt();
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, note_value, &rcm, &otag);
+        let cm = commit(&addr.d_j, note_value, &ASSET_TEZ, &rcm, &otag);
         w.notes.push(Note {
             nk_spend: nk_sp,
             nk_tag: nk_tg,
@@ -5172,7 +5172,7 @@ mod tests {
         let nk_tg = derive_nk_tag(&nk_sp);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, value, &rcm, &otag);
+        let cm = commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &otag);
         let (ek_v, _, ek_d, _) = w.kem_keys(j);
         let enc = encrypt_note(value, &rseed, memo, &ek_v, &ek_d);
         NoteMemo { index: 0, cm, enc }
@@ -5185,7 +5185,7 @@ mod tests {
         let nk_tag = derive_nk_tag(&nk_spend);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tag);
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, value, &rcm, &otag);
+        let cm = commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &otag);
         Note {
             nk_spend,
             nk_tag,
@@ -5952,7 +5952,7 @@ mod tests {
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rseed = random_felt();
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, 77, &rcm, &otag);
+        let cm = commit(&addr.d_j, 77, &ASSET_TEZ, &rcm, &otag);
         let (ek_v, _, ek_d, _) = w.kem_keys(0);
         let enc = encrypt_note(77, &rseed, Some(b"new"), &ek_v, &ek_d);
         let nm = NoteMemo { index: 5, cm, enc };
@@ -5996,7 +5996,7 @@ mod tests {
         let other_owner_tag = owner_tag(&other_auth_root, &other_auth_pub_seed, &other_nk_tag);
         let mut rseed = ZERO;
         rseed[0] = 0x22;
-        let cm = commit(&d_j, 88, &derive_rcm(&rseed), &other_owner_tag);
+        let cm = commit(&d_j, 88, &ASSET_TEZ, &derive_rcm(&rseed), &other_owner_tag);
         let nm = NoteMemo {
             index: 3,
             cm,
@@ -7031,6 +7031,7 @@ mod tests {
             commit(
                 &recipient.d_j,
                 recipient_value,
+                &ASSET_TEZ,
                 &derive_rcm(&recipient_rseed),
                 &recipient_otag
             ),
@@ -7051,6 +7052,7 @@ mod tests {
             commit(
                 &change_addr.d_j,
                 change_value,
+                &ASSET_TEZ,
                 &derive_rcm(&change_rseed),
                 &change_otag
             ),
@@ -7071,6 +7073,7 @@ mod tests {
             commit(
                 &producer_address.d_j,
                 producer_value,
+                &ASSET_TEZ,
                 &derive_rcm(&producer_rseed),
                 &producer_otag
             ),
@@ -7156,6 +7159,7 @@ mod tests {
             commit(
                 &change_addr.d_j,
                 change_value,
+                &ASSET_TEZ,
                 &derive_rcm(&change_rseed),
                 &change_otag
             ),
@@ -7176,6 +7180,7 @@ mod tests {
             commit(
                 &producer_address.d_j,
                 producer_value,
+                &ASSET_TEZ,
                 &derive_rcm(&producer_rseed),
                 &producer_otag
             ),
@@ -9560,7 +9565,7 @@ mod network_profile_tests {
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tag);
         let rseed = felt_tag(b"canonical-unshield");
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, note_value, &rcm, &otag);
+        let cm = commit(&addr.d_j, note_value, &ASSET_TEZ, &rcm, &otag);
         wallet.notes.push(Note {
             nk_spend,
             nk_tag,
@@ -11008,7 +11013,7 @@ mod network_profile_tests {
             // existing helper used in adjacent tests for the same job.
             let rseed = random_felt();
             let rcm = derive_rcm(&rseed);
-            let cm = commit(&addr.d_j, value, &rcm, &otag);
+            let cm = commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &otag);
             w.notes.push(Note {
                 nk_spend: nk_sp,
                 nk_tag: nk_tg,

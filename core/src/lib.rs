@@ -20,6 +20,13 @@ use tezos_smart_rollup_encoding::contract::Contract as TezosContract;
 
 pub type F = [u8; 32];
 pub const ZERO: F = [0u8; 32];
+
+/// Canonical tez asset tag. The multiasset commitment scheme binds an
+/// asset field inside every note commitment; `0` is reserved for tez,
+/// other felts are future bridge-defined tags. In v1 only the tez
+/// bridge is deployed, so every commitment built by the wallet uses
+/// this constant.
+pub const ASSET_TEZ: F = ZERO;
 pub const DETECT_K: usize = 10;
 pub const ML_KEM768_CIPHERTEXT_BYTES: usize = 1088;
 pub const NOTE_AEAD_NONCE_BYTES: usize = 12;
@@ -364,14 +371,23 @@ pub fn owner_tag(auth_root: &F, auth_pub_seed: &F, nk_tag: &F) -> F {
     blake2s_parts_personalized(b"ownrSP__", &[auth_root, auth_pub_seed, nk_tag])
 }
 
-pub fn commit(d_j: &F, v: u64, rcm: &F, otag: &F) -> F {
-    let mut buf = [0u8; 128];
+pub fn commit(d_j: &F, v: u64, asset: &F, rcm: &F, otag: &F) -> F {
+    // Multiasset commitment encoding (160 bytes, mirrors the Cairo
+    // `hash5` layout in blake_hash.cairo):
+    //   [  0.. 32) d_j
+    //   [ 32.. 40) v as u64 little-endian
+    //   [ 40.. 64) zeros (padding for v's felt slot)
+    //   [ 64.. 96) asset tag (32 bytes)
+    //   [ 96..128) rcm
+    //   [128..160) owner_tag
+    // The asset tag is hashed alongside value/randomness, so observers
+    // cannot tell which asset a given commitment encodes.
+    let mut buf = [0u8; 160];
     buf[..32].copy_from_slice(d_j);
-    // Canonical commitment encoding stores v as a u64 in bytes [32..40).
-    // Bytes [40..64) are intentionally zero.
     buf[32..40].copy_from_slice(&v.to_le_bytes());
-    buf[64..96].copy_from_slice(rcm);
-    buf[96..128].copy_from_slice(otag);
+    buf[64..96].copy_from_slice(asset);
+    buf[96..128].copy_from_slice(rcm);
+    buf[128..160].copy_from_slice(otag);
     hash_commit_raw(&buf)
 }
 
@@ -1074,7 +1090,7 @@ impl OutgoingRecoveryPlaintext {
     pub fn commitment(&self) -> F {
         let rcm = derive_rcm(&self.rseed);
         let owner = owner_tag(&self.auth_root, &self.auth_pub_seed, &self.nk_tag);
-        commit(&self.d_j, self.value, &rcm, &owner)
+        commit(&self.d_j, self.value, &ASSET_TEZ, &rcm, &owner)
     }
 
     pub fn encode(&self) -> [u8; OUTGOING_RECOVERY_PLAINTEXT_BYTES] {
@@ -2736,7 +2752,7 @@ mod tests {
             encrypt_note_deterministic(v, &rseed, memo, &ek_v, &ek_d, &[0x11; 32], &[0x22; 32]);
         let rcm = derive_rcm(&rseed);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &addr.nk_tag);
-        let cm = commit(&addr.d_j, v, &rcm, &otag);
+        let cm = commit(&addr.d_j, v, &ASSET_TEZ, &rcm, &otag);
         (enc, cm)
     }
 
@@ -3071,8 +3087,8 @@ mod tests {
             let rseed_1 = truncate_felt(rseed_1);
             let rseed_2 = truncate_felt(rseed_2);
             prop_assert_ne!(
-                commit(&d_j, v, &derive_rcm(&rseed_1), &otag),
-                commit(&d_j, v, &derive_rcm(&rseed_2), &otag)
+                commit(&d_j, v, &ASSET_TEZ, &derive_rcm(&rseed_1), &otag),
+                commit(&d_j, v, &ASSET_TEZ, &derive_rcm(&rseed_2), &otag)
             );
         }
 
@@ -3276,7 +3292,7 @@ mod tests {
 
         let rcm = derive_rcm(&decrypted_rseed);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &addr.nk_tag);
-        let recomputed = commit(&addr.d_j, value, &rcm, &otag);
+        let recomputed = commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &otag);
         assert_eq!(recomputed, cm);
     }
 
@@ -3289,7 +3305,7 @@ mod tests {
             "fixture should encode the canonical low-8-byte u64::MAX layout"
         );
         assert_eq!(
-            commit(&fixture.d_j, u64::MAX, &fixture.rcm, &fixture.owner_tag),
+            commit(&fixture.d_j, u64::MAX, &ASSET_TEZ, &fixture.rcm, &fixture.owner_tag),
             fixture.cm
         );
     }

@@ -333,6 +333,7 @@ fn sample_data() -> (PaymentAddress, EncryptedNote, F, NoteMemo, F, F, u64) {
     let cm = crate::commit(
         &address.d_j,
         v,
+        &crate::ASSET_TEZ,
         &crate::derive_rcm(&rseed),
         &crate::owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag),
     );

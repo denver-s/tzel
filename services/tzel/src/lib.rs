@@ -361,7 +361,7 @@ mod tests {
         rseed[0] = 0x01;
         rseed[1] = 0x10; // 0x1001
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, 1000, &rcm, &otag);
+        let cm = commit(&addr.d_j, 1000, &ASSET_TEZ, &rcm, &otag);
         let nf = nullifier(&nk_sp, &cm, 0);
         let ask_j = derive_ask(&acc.ask_base, 0);
         let pub_seed = derive_auth_pub_seed(&ask_j);
@@ -523,7 +523,7 @@ mod tests {
         let rseed = u(0xABCD);
         let rcm = derive_rcm(&rseed);
         let otag = owner_tag(&auth_root, &auth_pub_seed, &nk_tg);
-        let cm_recipient = commit(&d_j, v, &rcm, &otag);
+        let cm_recipient = commit(&d_j, v, &ASSET_TEZ, &rcm, &otag);
         let enc_recipient = encrypt_note_deterministic(
             v,
             &rseed,

@@ -9,6 +9,7 @@
 
 use tzel::blake_hash as hash;
 use tzel::{merkle, xmss_common};
+use tzel::ASSET_TEZ;
 
 const MAX_INPUTS: u32 = 7;
 
@@ -25,7 +26,7 @@ fn change_commitment_or_zero(
     if has_change {
         let rcm_c = hash::derive_rcm(rseed_change);
         let otag_c = hash::owner_tag(auth_root_change, auth_pub_seed_change, nk_tag_change);
-        hash::commit(d_j_change, v_change, rcm_c, otag_c)
+        hash::commit(d_j_change, v_change, ASSET_TEZ, rcm_c, otag_c)
     } else {
         assert(v_change == 0, 'unshield: no change but v!=0');
         assert(memo_ct_hash_change == 0, 'unshield: mh!=0 but no change');
@@ -111,7 +112,7 @@ pub fn verify(
     sighash = hash::sighash_fold(sighash, memo_ct_hash_change);
     let rcm_fee = hash::derive_rcm(rseed_fee);
     let otag_fee = hash::owner_tag(auth_root_fee, auth_pub_seed_fee, nk_tag_fee);
-    let cm_fee = hash::commit(d_j_fee, v_fee, rcm_fee, otag_fee);
+    let cm_fee = hash::commit(d_j_fee, v_fee, ASSET_TEZ, rcm_fee, otag_fee);
     sighash = hash::sighash_fold(sighash, cm_fee);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_fee);
 
@@ -130,7 +131,7 @@ pub fn verify(
         let nk_tag = hash::derive_nk_tag(nk_spend);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
         let rcm = hash::derive_rcm(rseed);
-        let cm = hash::commit(d_j, v, rcm, otag);
+        let cm = hash::commit(d_j, v, ASSET_TEZ, rcm, otag);
 
         let cm_sib_start = i * merkle::TREE_DEPTH;
         let cm_siblings = cm_siblings_flat.slice(cm_sib_start, merkle::TREE_DEPTH);
@@ -179,6 +180,7 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use tzel::{blake_hash as hash, merkle, xmss_common};
+    use tzel::ASSET_TEZ;
     use super::{change_commitment_or_zero, verify};
 
     const TAG_XMSS_TREE_TEST: felt252 = 0x72742D73736D78;
@@ -295,7 +297,7 @@ mod tests {
     ) -> felt252 {
         let rcm = hash::derive_rcm(rseed);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
-        hash::commit(d_j, v, rcm, otag)
+        hash::commit(d_j, v, ASSET_TEZ, rcm, otag)
     }
 
     fn unshield_sighash(
@@ -882,7 +884,7 @@ mod tests {
 
         let rcm = hash::derive_rcm(rseed);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
-        let expected = hash::commit(d_j, v, rcm, otag);
+        let expected = hash::commit(d_j, v, ASSET_TEZ, rcm, otag);
 
         assert(
             change_commitment_or_zero(

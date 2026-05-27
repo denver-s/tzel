@@ -2033,7 +2033,7 @@ mod tests {
     };
     use tzel_core::kernel_wire::KernelDalChunkPointer;
     use tzel_core::{
-        commit, default_auth_domain, deposit_recipient_string, derive_account, derive_address,
+        commit, default_auth_domain, deposit_recipient_string, derive_account, derive_address, ASSET_TEZ,
         derive_ask, derive_auth_pub_seed, derive_kem_keys, derive_nk_spend, derive_nk_tag,
         derive_rcm, encrypt_note_deterministic, felt_tag, hash, hash_two,
         kernel_wire::{
@@ -4336,6 +4336,7 @@ mod tests {
         commit(
             &address.d_j,
             value,
+            &ASSET_TEZ,
             &derive_rcm(&rseed),
             &owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag),
         )

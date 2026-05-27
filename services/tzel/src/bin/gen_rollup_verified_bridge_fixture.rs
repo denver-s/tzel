@@ -782,9 +782,9 @@ fn note_commitment(address: &PaymentAddress, value: u64, rseed: &F) -> F {
     commit(
         &address.d_j,
         value,
+        &ASSET_TEZ,
         &derive_rcm(rseed),
-        &owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag),
-    )
+        &owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag))
 }
 
 fn fixed_felt(seed: u8) -> F {
