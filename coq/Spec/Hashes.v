@@ -71,6 +71,12 @@ Definition injective_4 (H : Felt -> Felt -> Felt -> Felt -> Felt) : Prop :=
     H a1 a2 a3 a4 = H b1 b2 b3 b4 ->
     a1 = b1 /\ a2 = b2 /\ a3 = b3 /\ a4 = b4.
 
+Definition injective_5
+    (H : Felt -> Felt -> Felt -> Felt -> Felt -> Felt) : Prop :=
+  forall a1 a2 a3 a4 a5 b1 b2 b3 b4 b5,
+    H a1 a2 a3 a4 a5 = H b1 b2 b3 b4 b5 ->
+    a1 = b1 /\ a2 = b2 /\ a3 = b3 /\ a4 = b4 /\ a5 = b5.
+
 (** Per-slot injectivity for the level/position-indexed node hash
     used in auth trees and L-trees.  The hash is injective within
     each (level, node_idx) slot; cross-slot collisions are prevented
@@ -149,25 +155,33 @@ End SighashFold.
 (** ** Commitment and nullifier construction                          *)
 (* ================================================================ *)
 
-(** The note commitment binds (denomination, value, randomness,
-    owner_tag) into an opaque value stored in the Merkle tree.
+(** The note commitment binds (denomination, value, asset, randomness,
+    owner_tag) into an opaque value stored in the Merkle tree.  The
+    [asset] field is hidden inside the hash preimage — it does not
+    appear in the cleartext nullifier or anywhere else publicly, so
+    an on-chain observer cannot tell which asset a given commitment
+    encodes.  Asset = [Felt(0)] by convention denotes tez; any other
+    value is a future bridge-defined tag.
+
     The nullifier is position-dependent: it binds the spend key,
     the commitment, and the leaf position, ensuring that spending
     the same note at the same position always produces the same
     nullifier (double-spend detection) but spending different notes
     or the same note at different positions produces distinct
-    nullifiers (privacy).
+    nullifiers (privacy).  The asset is bound through [cm] (which
+    appears in the inner hash) — there is no separate "asset
+    nullifier" because the same note cannot have two assets.
 
     Source: spec.md "Commitments and nullifiers". *)
 
 Section Nullifier.
 
-  Variable H_commit : Felt -> Felt -> Felt -> Felt -> Felt.
+  Variable H_commit : Felt -> Felt -> Felt -> Felt -> Felt -> Felt.
   Variable H_nf : Felt -> Felt -> Felt.
 
-  (** Note commitment: [cm = H_commit(d_j, v, rcm, owner_tag)]. *)
-  Definition commitment (d_j v rcm owner_tag : Felt) : Felt :=
-    H_commit d_j v rcm owner_tag.
+  (** Note commitment: [cm = H_commit(d_j, v, asset, rcm, owner_tag)]. *)
+  Definition commitment (d_j v asset rcm owner_tag : Felt) : Felt :=
+    H_commit d_j v asset rcm owner_tag.
 
   (** Nullifier: [nf = H_nf(nk_spend, H_nf(cm, pos))].
       Position-dependent to prevent faerie-gold attacks. *)

@@ -10,3 +10,9 @@
     realizes [Felt] as OCaml [bytes] (32-byte little-endian),
     matching [tzel/protocol/felt.ml]. *)
 Parameter Felt : Type.
+
+(** Decidable equality on [Felt].  Justified because [Felt] is a finite
+    field — the OCaml realization uses [Bytes.equal] on the 32-byte
+    encoding.  Required by the multiasset spec to partition input /
+    output lists by their asset tag. *)
+Parameter Felt_eq_dec : forall x y : Felt, {x = y} + {x <> y}.
