@@ -468,6 +468,8 @@ pub fn unshield_sighash(
     recipient: &F,
     cm_change: &F,
     mh_change: &F,
+    cm_change_2: &F,
+    mh_change_2: &F,
     cm_fee: &F,
     mh_fee: &F,
 ) -> F {
@@ -485,6 +487,8 @@ pub fn unshield_sighash(
     sh = sighash_fold(&sh, recipient);
     sh = sighash_fold(&sh, cm_change);
     sh = sighash_fold(&sh, mh_change);
+    sh = sighash_fold(&sh, cm_change_2);
+    sh = sighash_fold(&sh, mh_change_2);
     sh = sighash_fold(&sh, cm_fee);
     sh = sighash_fold(&sh, mh_fee);
     sh
@@ -4043,8 +4047,11 @@ mod tests {
             &recipient,
             &cm_1,
             &cm_fee,
+            &ZERO,
+            &ZERO,
             &mh_1,
             &mh_fee
+        
         );
         assert_ne!(
             unshield,
@@ -4058,8 +4065,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4075,8 +4086,12 @@ mod tests {
                 &u(10),
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4092,8 +4107,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4109,8 +4128,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4126,8 +4149,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4143,8 +4170,12 @@ mod tests {
                 &recipient,
                 &u(11),
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4160,8 +4191,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &u(14),
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &mh_fee
+            
+            
             
             )
         );
@@ -4177,9 +4212,13 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &u(12),
                 &mh_fee
             
+            
+            
             )
         );
         assert_ne!(
@@ -4194,8 +4233,12 @@ mod tests {
                 &recipient,
                 &cm_1,
                 &cm_fee,
+                &ZERO,
+                &ZERO,
                 &mh_1,
                 &u(15)
+            
+            
             
             )
         );

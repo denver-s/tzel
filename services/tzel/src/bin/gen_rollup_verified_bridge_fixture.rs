@@ -585,8 +585,11 @@ fn generate_unshield_proof(
         &recipient_f,
         &ZERO,
         &ZERO,
+        &ZERO,
+        &ZERO,
         &fee_cm,
         &fee_mh
+    
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, 0, &sighash);
 

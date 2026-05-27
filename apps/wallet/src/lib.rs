@@ -8366,8 +8366,11 @@ fn cmd_unshield(
             &recipient_f,
             &cm_change,
             &mh_change_f,
+            &ZERO,
+            &ZERO,
             &producer_note.cm,
             &producer_note.mh
+        
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -9089,8 +9092,11 @@ fn cmd_unshield_rollup(
             &recipient_f,
             &cm_change,
             &mh_change_f,
+            &ZERO,
+            &ZERO,
             &producer_note.cm,
             &producer_note.mh
+        
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];

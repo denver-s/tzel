@@ -1355,8 +1355,11 @@ mod tests {
             &cm_2,
             &mh,
             &cm_3,
+            &ZERO,
+            &ZERO,
             &mh_3,
             &mh
+        
         );
 
         assert_ne!(
@@ -1899,8 +1902,11 @@ mod tests {
             &recipient,
             &ZERO,
             &ZERO,
+            &ZERO,
+            &ZERO,
             &cm_3,
             &mh_3
+        
         );
         assert_ne!(ush, ZERO, "unshield_sighash must not be zero");
         assert_ne!(ush, sh, "transfer and unshield sighash must differ");
@@ -1916,8 +1922,11 @@ mod tests {
             &recipient,
             &ZERO,
             &ZERO,
+            &ZERO,
+            &ZERO,
             &cm_3,
             &mh_3
+        
         );
         assert_eq!(ush, ush2);
 
@@ -1932,8 +1941,11 @@ mod tests {
             &recipient,
             &ZERO,
             &ZERO,
+            &ZERO,
+            &ZERO,
             &cm_3,
             &mh_3
+        
         );
         assert_ne!(ush, ush3, "different v_pub must change sighash");
 

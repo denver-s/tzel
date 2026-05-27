@@ -3,7 +3,7 @@ use tzel_core::{
     derive_auth_pub_seed, derive_nk_tag, derive_rcm, felt_tag, hash, hash_two, nullifier,
     owner_tag, shield_sighash, transfer_sighash, u64_to_felt, unshield_sighash, wots_pk,
     wots_pk_to_leaf, wots_sign, xmss_tree_node_hash, Account, CircuitKind, MerkleTree,
-    ASSET_TEZ, AUTH_DEPTH, AUTH_TREE_SIZE, DEPTH, F, MIN_TX_FEE, WOTS_CHAINS,
+    ASSET_TEZ, AUTH_DEPTH, AUTH_TREE_SIZE, DEPTH, F, MIN_TX_FEE, WOTS_CHAINS, ZERO,
 };
 
 pub const MAX_BENCH_INPUTS: usize = 7;
@@ -445,8 +445,11 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         &recipient,
         &cm_change,
         &mh_change,
+        &ZERO,
+        &ZERO,
         &cm_fee,
         &mh_fee
+    
     );
 
     let mut cm_paths = Vec::with_capacity(n_inputs);
