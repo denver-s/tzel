@@ -35,6 +35,9 @@ pub fn verify(
     auth_siblings_flat: Span<felt252>,
     cm_path_indices_list: Span<u64>,
     wots_sig_flat: Span<felt252>,
+    // Multiasset (Phase B): per-input asset tag; each input is required
+    // to be either tez or a single witness-supplied non-tez asset.
+    input_asset_list: Span<felt252>,
     d_j_1: felt252,
     v_1: u64,
     rseed_1: felt252,
@@ -42,6 +45,7 @@ pub fn verify(
     auth_pub_seed_1: felt252,
     nk_tag_1: felt252,
     memo_ct_hash_1: felt252,
+    asset_1: felt252,
     d_j_2: felt252,
     v_2: u64,
     rseed_2: felt252,
@@ -49,6 +53,7 @@ pub fn verify(
     auth_pub_seed_2: felt252,
     nk_tag_2: felt252,
     memo_ct_hash_2: felt252,
+    asset_2: felt252,
     d_j_3: felt252,
     v_3: u64,
     rseed_3: felt252,
@@ -56,6 +61,14 @@ pub fn verify(
     auth_pub_seed_3: felt252,
     nk_tag_3: felt252,
     memo_ct_hash_3: felt252,
+    asset_3: felt252,
+    // 2-accumulator multiasset balance witness: every input and output
+    // asset must be in {ASSET_TEZ, primary_non_tez_asset}. For pure-tez
+    // transactions, primary_non_tez_asset may be any value (no constraint
+    // will reference it because no input/output asset will match it
+    // unless it equals ASSET_TEZ, in which case the constraint is
+    // trivially satisfied).
+    primary_non_tez_asset: felt252,
 ) -> Array<felt252> {
     let n = nf_list.len();
     assert(n >= 1, 'transfer: need >= 1 input');
@@ -68,9 +81,14 @@ pub fn verify(
     assert(v_in_list.len() == n, 'transfer: v len');
     assert(rseed_in_list.len() == n, 'transfer: rseed len');
     assert(cm_path_indices_list.len() == n, 'transfer: path len');
+    assert(input_asset_list.len() == n, 'transfer: asset list len');
     assert(cm_siblings_flat.len() == n * merkle::TREE_DEPTH, 'transfer: cm_sibs len');
     assert(auth_siblings_flat.len() == n * merkle::AUTH_DEPTH, 'transfer: auth_sibs len');
     assert(wots_sig_flat.len() == n * xmss_common::WOTS_CHAINS, 'transfer: wots sig len');
+    // Producer-fee output (asset_3) must be tez so the DAL slot
+    // publisher can monetize it regardless of the transfer's primary
+    // asset. This is permanent (not v1-only).
+    assert(asset_3 == ASSET_TEZ, 'transfer: producer must be tez');
 
     let mut sighash = hash::sighash_fold(0x01, auth_domain);
     sighash = hash::sighash_fold(sighash, root);
@@ -87,7 +105,12 @@ pub fn verify(
     sighash = hash::sighash_fold(sighash, memo_ct_hash_2);
     sighash = hash::sighash_fold(sighash, memo_ct_hash_3);
 
-    let mut sum_in: u128 = 0;
+    // 2-accumulator per-asset balance: tez_in / tez_out accumulate
+    // contributions whose asset == ASSET_TEZ; primary_in / primary_out
+    // accumulate contributions whose asset == primary_non_tez_asset.
+    // Every input/output asset must be in {ASSET_TEZ, primary_non_tez_asset}.
+    let mut tez_in: u128 = 0;
+    let mut primary_in: u128 = 0;
     let mut i: u32 = 0;
     while i < n {
         let nk_spend = *nk_spend_list.at(i);
@@ -98,11 +121,20 @@ pub fn verify(
         let v: u64 = *v_in_list.at(i);
         let rseed = *rseed_in_list.at(i);
         let cm_path_idx = *cm_path_indices_list.at(i);
+        let asset_i = *input_asset_list.at(i);
+
+        // Asset must be either tez or the single witness-declared
+        // non-tez asset. This is the 2-accumulator constraint that
+        // implements the spec's per-asset balance.
+        assert(
+            asset_i == ASSET_TEZ || asset_i == primary_non_tez_asset,
+            'transfer: bad input asset',
+        );
 
         let nk_tag = hash::derive_nk_tag(nk_spend);
         let otag = hash::owner_tag(auth_root, auth_pub_seed, nk_tag);
         let rcm = hash::derive_rcm(rseed);
-        let cm = hash::commit(d_j, v, ASSET_TEZ, rcm, otag);
+        let cm = hash::commit(d_j, v, asset_i, rcm, otag);
 
         let cm_sib_start = i * merkle::TREE_DEPTH;
         merkle::verify(
@@ -128,34 +160,67 @@ pub fn verify(
 
         let nf = hash::nullifier(nk_spend, cm, cm_path_idx);
         assert(nf == *nf_list.at(i), 'transfer: bad nf');
-        sum_in += v.into();
+        if asset_i == ASSET_TEZ {
+            tez_in += v.into();
+        } else {
+            primary_in += v.into();
+        }
         i += 1;
     }
 
+    // Output 1 (recipient): asset must be in {tez, primary}.
+    assert(
+        asset_1 == ASSET_TEZ || asset_1 == primary_non_tez_asset,
+        'transfer: bad asset_1',
+    );
     let rcm_1 = hash::derive_rcm(rseed_1);
     let otag_1 = hash::owner_tag(auth_root_1, auth_pub_seed_1, nk_tag_1);
     assert(
-        hash::commit(d_j_1, v_1, ASSET_TEZ, rcm_1, otag_1) == cm_1,
+        hash::commit(d_j_1, v_1, asset_1, rcm_1, otag_1) == cm_1,
         'transfer: bad cm_1',
     );
 
+    // Output 2 (change): asset must be in {tez, primary}.
+    assert(
+        asset_2 == ASSET_TEZ || asset_2 == primary_non_tez_asset,
+        'transfer: bad asset_2',
+    );
     let rcm_2 = hash::derive_rcm(rseed_2);
     let otag_2 = hash::owner_tag(auth_root_2, auth_pub_seed_2, nk_tag_2);
     assert(
-        hash::commit(d_j_2, v_2, ASSET_TEZ, rcm_2, otag_2) == cm_2,
+        hash::commit(d_j_2, v_2, asset_2, rcm_2, otag_2) == cm_2,
         'transfer: bad cm_2',
     );
 
+    // Output 3 (producer fee): asset pinned to tez above; reconstruct cm.
     let rcm_3 = hash::derive_rcm(rseed_3);
     let otag_3 = hash::owner_tag(auth_root_3, auth_pub_seed_3, nk_tag_3);
     assert(
-        hash::commit(d_j_3, v_3, ASSET_TEZ, rcm_3, otag_3) == cm_3,
+        hash::commit(d_j_3, v_3, asset_3, rcm_3, otag_3) == cm_3,
         'transfer: bad cm_3',
     );
 
     assert(v_3 > 0_u64, 'transfer prod fee');
-    let sum_out: u128 = v_1.into() + v_2.into() + v_3.into() + fee.into();
-    assert(sum_in == sum_out, 'transfer: balance mismatch');
+
+    // Tally outputs into the per-asset accumulators.
+    let mut tez_out: u128 = v_3.into(); // asset_3 == ASSET_TEZ
+    let mut primary_out: u128 = 0;
+    if asset_1 == ASSET_TEZ {
+        tez_out += v_1.into();
+    } else {
+        primary_out += v_1.into();
+    }
+    if asset_2 == ASSET_TEZ {
+        tez_out += v_2.into();
+    } else {
+        primary_out += v_2.into();
+    }
+
+    // Per-asset balance: tez accumulator covers the public fee, the
+    // primary non-tez accumulator must balance exactly (no public fee
+    // possible in a non-tez asset — the L1 ledger only knows mutez).
+    assert(tez_in == tez_out + fee.into(), 'transfer: tez balance');
+    assert(primary_in == primary_out, 'transfer: primary balance');
 
     let mut outputs: Array<felt252> = array![auth_domain, root];
     let mut j: u32 = 0;
@@ -222,6 +287,12 @@ mod tests {
         auth_pub_seed_3: felt252,
         nk_tag_3: felt252,
         memo_ct_hash_3: felt252,
+        // Multiasset Phase B
+        input_asset_list: Array<felt252>,
+        asset_1: felt252,
+        asset_2: felt252,
+        asset_3: felt252,
+        primary_non_tez_asset: felt252,
     }
 
     fn copy_and_mutate(values: Span<felt252>, target: u32) -> Array<felt252> {
@@ -501,6 +572,12 @@ mod tests {
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            // Multiasset Phase B: pure-tez fixture.
+            input_asset_list: array![ASSET_TEZ],
+            asset_1: ASSET_TEZ,
+            asset_2: ASSET_TEZ,
+            asset_3: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -719,6 +796,12 @@ mod tests {
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            // Multiasset Phase B: pure-tez 2-input fixture.
+            input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
+            asset_1: ASSET_TEZ,
+            asset_2: ASSET_TEZ,
+            asset_3: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -1053,6 +1136,14 @@ mod tests {
             m += 1;
         }
 
+        // Multiasset Phase B: pure-tez asset list (length n_inputs).
+        let mut input_asset_list: Array<felt252> = array![];
+        let mut q: u32 = 0;
+        while q < n_inputs {
+            input_asset_list.append(ASSET_TEZ);
+            q += 1;
+        }
+
         TransferFixture {
             auth_domain,
             root,
@@ -1093,6 +1184,11 @@ mod tests {
             auth_pub_seed_3,
             nk_tag_3,
             memo_ct_hash_3,
+            input_asset_list,
+            asset_1: ASSET_TEZ,
+            asset_2: ASSET_TEZ,
+            asset_3: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -1196,6 +1292,12 @@ mod tests {
             auth_pub_seed_3: base.auth_pub_seed_3,
             nk_tag_3: base.nk_tag_3,
             memo_ct_hash_3: base.memo_ct_hash_3,
+            // Multiasset Phase B: pure-tez duplicate-nf fixture (2 inputs).
+            input_asset_list: array![ASSET_TEZ, ASSET_TEZ],
+            asset_1: ASSET_TEZ,
+            asset_2: ASSET_TEZ,
+            asset_3: ASSET_TEZ,
+            primary_non_tez_asset: ASSET_TEZ,
         }
     }
 
@@ -1219,6 +1321,7 @@ mod tests {
             fixture.auth_siblings_flat.span(),
             fixture.cm_path_indices_list.span(),
             fixture.wots_sig_flat.span(),
+            fixture.input_asset_list.span(),
             fixture.d_j_1,
             fixture.v_1,
             fixture.rseed_1,
@@ -1226,6 +1329,7 @@ mod tests {
             fixture.auth_pub_seed_1,
             fixture.nk_tag_1,
             fixture.memo_ct_hash_1,
+            fixture.asset_1,
             fixture.d_j_2,
             fixture.v_2,
             fixture.rseed_2,
@@ -1233,6 +1337,7 @@ mod tests {
             fixture.auth_pub_seed_2,
             fixture.nk_tag_2,
             fixture.memo_ct_hash_2,
+            fixture.asset_2,
             fixture.d_j_3,
             fixture.v_3,
             fixture.rseed_3,
@@ -1240,6 +1345,8 @@ mod tests {
             fixture.auth_pub_seed_3,
             fixture.nk_tag_3,
             fixture.memo_ct_hash_3,
+            fixture.asset_3,
+            fixture.primary_non_tez_asset,
         )
     }
 
@@ -1371,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected: ('transfer: balance mismatch',))]
+    #[should_panic(expected: ('transfer: tez balance',))]
     fn test_transfer_rejects_balance_mismatch_even_with_consistent_output_commitment() {
         let fixture = build_fixture_with_values_and_fee(70_u64, 45_u64, 21_u64, 3_u64, 5_u64);
         run_verify(@fixture);

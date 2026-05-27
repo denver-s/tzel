@@ -313,6 +313,10 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
             args.push(felt_to_hex(s));
         }
     }
+    // Multiasset Phase B: per-input asset tags (pure-tez bench).
+    for _ in 0..n_inputs {
+        args.push(felt_to_hex(&ASSET_TEZ));
+    }
 
     args.push(felt_to_hex(&cm_1));
     args.push(felt_to_hex(&d_j_1));
@@ -322,6 +326,7 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_1));
     args.push(felt_to_hex(&nk_tag_1));
     args.push(felt_to_hex(&mh_1));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_1
 
     args.push(felt_to_hex(&cm_2));
     args.push(felt_to_hex(&d_j_2));
@@ -331,6 +336,7 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_2));
     args.push(felt_to_hex(&nk_tag_2));
     args.push(felt_to_hex(&mh_2));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_2
 
     args.push(felt_to_hex(&cm_3));
     args.push(felt_to_hex(&d_j_3));
@@ -340,6 +346,11 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_3));
     args.push(felt_to_hex(&nk_tag_3));
     args.push(felt_to_hex(&mh_3));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_3 (pinned to tez by circuit)
+
+    // primary_non_tez_asset — any value works for pure-tez txs;
+    // we use ASSET_TEZ for the bench.
+    args.push(felt_to_hex(&ASSET_TEZ));
 
     let mut expected_public_outputs = vec![auth_domain, root];
     expected_public_outputs.extend(nullifiers.iter().copied());

@@ -465,7 +465,9 @@ fn generate_transfer_proof(
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, input_auth_idx, &sighash);
 
-    let total_fields = 4 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 24;
+    // Phase B adds N input_asset entries, 3 per-output asset entries,
+    // and 1 primary_non_tez_asset entry: N=1, so +1+3+1 = +5.
+    let total_fields = 4 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 24 + 5;
     let mut args = vec![
         felt_u64_to_hex(total_fields as u64),
         felt_u64_to_hex(1),
@@ -492,6 +494,8 @@ fn generate_transfer_proof(
     for felt in &sig {
         args.push(felt_to_hex(felt));
     }
+    // Multiasset Phase B: 1 input, pure-tez.
+    args.push(felt_to_hex(&ASSET_TEZ));
 
     args.extend([
         felt_to_hex(&cm_1),
@@ -502,6 +506,7 @@ fn generate_transfer_proof(
         felt_to_hex(&output_1.auth_pub_seed),
         felt_to_hex(&output_1.nk_tag),
         felt_to_hex(&mh_1),
+        felt_to_hex(&ASSET_TEZ), // asset_1
         felt_to_hex(&cm_2),
         felt_to_hex(&output_2.d_j),
         felt_u64_to_hex(v_2),
@@ -510,6 +515,7 @@ fn generate_transfer_proof(
         felt_to_hex(&output_2.auth_pub_seed),
         felt_to_hex(&output_2.nk_tag),
         felt_to_hex(&mh_2),
+        felt_to_hex(&ASSET_TEZ), // asset_2
         felt_to_hex(&cm_3),
         felt_to_hex(&output_3.d_j),
         felt_u64_to_hex(v_3),
@@ -518,6 +524,8 @@ fn generate_transfer_proof(
         felt_to_hex(&output_3.auth_pub_seed),
         felt_to_hex(&output_3.nk_tag),
         felt_to_hex(&mh_3),
+        felt_to_hex(&ASSET_TEZ), // asset_3 (producer pinned to tez)
+        felt_to_hex(&ASSET_TEZ), // primary_non_tez_asset
     ]);
 
     if note_commitment(&input_addr.payment, input_value, input_rseed) != input_cm {
