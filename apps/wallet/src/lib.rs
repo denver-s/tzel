@@ -2930,9 +2930,11 @@ fn transfer_req_to_kernel(req: &TransferReq) -> Result<KernelTransferReq, String
         cm_1: req.cm_1,
         cm_2: req.cm_2,
         cm_3: req.cm_3,
+        cm_4: req.cm_4,
         enc_1: req.enc_1.clone(),
         enc_2: req.enc_2.clone(),
         enc_3: req.enc_3.clone(),
+        enc_4: req.enc_4.clone(),
         proof: host_stark_proof_to_kernel(&req.proof)?,
     })
 }
@@ -2946,6 +2948,8 @@ fn unshield_req_to_kernel(req: &UnshieldReq) -> Result<KernelUnshieldReq, String
         recipient: req.recipient.clone(),
         cm_change: req.cm_change,
         enc_change: req.enc_change.clone(),
+        cm_change_2: req.cm_change_2,
+        enc_change_2: req.enc_change_2.clone(),
         cm_fee: req.cm_fee,
         enc_fee: req.enc_fee.clone(),
         proof: host_stark_proof_to_kernel(&req.proof)?,
@@ -8222,7 +8226,9 @@ fn cmd_transfer(
         cm_3: note_3.cm,
         enc_1: note_1.enc,
         enc_2: note_2.enc,
-        enc_3: note_3.enc,
+        enc_3: note_3.enc.clone(),
+        cm_4: ZERO, // Phase C placeholder
+        enc_4: note_3.enc.clone(),
         proof,
     };
     let resp: TransferResp = post_json(&format!("{}/transfer", ledger), &req)?;
@@ -8485,6 +8491,8 @@ fn cmd_unshield(
         recipient: recipient.clone(),
         cm_change,
         enc_change,
+        cm_change_2: ZERO,
+        enc_change_2: None,
         cm_fee: producer_note.cm,
         enc_fee: producer_note.enc,
         proof,
@@ -8951,7 +8959,9 @@ fn cmd_transfer_rollup(
         cm_3: note_3.cm,
         enc_1: note_1.enc,
         enc_2: note_2.enc,
-        enc_3: note_3.enc,
+        enc_3: note_3.enc.clone(),
+        cm_4: ZERO, // Phase C placeholder
+        enc_4: note_3.enc.clone(),
         proof,
     };
     let kernel_req = transfer_req_to_kernel(&req)?;
@@ -9204,6 +9214,8 @@ fn cmd_unshield_rollup(
         recipient: recipient.clone(),
         cm_change,
         enc_change,
+        cm_change_2: ZERO,
+        enc_change_2: None,
         cm_fee: producer_note.cm,
         enc_fee: producer_note.enc,
         proof,
@@ -9348,7 +9360,9 @@ fn prepare_transfer_skip_proof(
             cm_3: note_3.cm,
             enc_1: note_1.enc,
             enc_2: note_2.enc,
-            enc_3: note_3.enc,
+            enc_3: note_3.enc.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: note_3.enc.clone(),
             proof: Proof::TrustMeBro,
         },
     })
@@ -9421,6 +9435,8 @@ fn prepare_unshield_skip_proof(
             recipient: recipient.into(),
             cm_change,
             enc_change,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: producer_note.cm,
             enc_fee: producer_note.enc,
             proof: Proof::TrustMeBro,

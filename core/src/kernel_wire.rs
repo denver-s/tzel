@@ -86,12 +86,15 @@ pub struct KernelTransferReq {
     pub root: F,
     pub nullifiers: Vec<F>,
     pub fee: u64,
+    // Phase C: 4 output slots (recipient, change_1, change_2, producer).
     pub cm_1: F,
     pub cm_2: F,
     pub cm_3: F,
+    pub cm_4: F,
     pub enc_1: EncryptedNote,
     pub enc_2: EncryptedNote,
     pub enc_3: EncryptedNote,
+    pub enc_4: EncryptedNote,
     pub proof: KernelStarkProof,
 }
 
@@ -102,8 +105,11 @@ pub struct KernelUnshieldReq {
     pub v_pub: u64,
     pub fee: u64,
     pub recipient: String,
+    // Phase C: two change slots.
     pub cm_change: F,
     pub enc_change: Option<EncryptedNote>,
+    pub cm_change_2: F,
+    pub enc_change_2: Option<EncryptedNote>,
     pub cm_fee: F,
     pub enc_fee: EncryptedNote,
     pub proof: KernelStarkProof,
@@ -251,6 +257,7 @@ struct WireTransferResp {
     index_1: WireU64Le,
     index_2: WireU64Le,
     index_3: WireU64Le,
+    index_4: WireU64Le,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, HasEncoding, NomReader, BinWriter)]
@@ -298,6 +305,7 @@ struct WireKernelDalPayloadPointer {
 #[derive(Debug, Clone, PartialEq, Eq, HasEncoding, NomReader, BinWriter)]
 struct WireUnshieldResp {
     change_index: Option<WireU64Le>,
+    change_index_2: Option<WireU64Le>,
     producer_index: WireU64Le,
 }
 
@@ -568,9 +576,11 @@ pub fn kernel_transfer_req_to_host(req: &KernelTransferReq) -> TransferReq {
         cm_1: req.cm_1,
         cm_2: req.cm_2,
         cm_3: req.cm_3,
+        cm_4: req.cm_4,
         enc_1: req.enc_1.clone(),
         enc_2: req.enc_2.clone(),
         enc_3: req.enc_3.clone(),
+        enc_4: req.enc_4.clone(),
         proof: kernel_proof_to_host(&req.proof),
     }
 }
@@ -584,6 +594,8 @@ pub fn kernel_unshield_req_to_host(req: &KernelUnshieldReq) -> UnshieldReq {
         recipient: req.recipient.clone(),
         cm_change: req.cm_change,
         enc_change: req.enc_change.clone(),
+        cm_change_2: req.cm_change_2,
+        enc_change_2: req.enc_change_2.clone(),
         cm_fee: req.cm_fee,
         enc_fee: req.enc_fee.clone(),
         proof: kernel_proof_to_host(&req.proof),
@@ -955,10 +967,12 @@ fn kernel_transfer_req_to_wire(req: &KernelTransferReq) -> Result<WireKernelTran
     bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_1))?);
     bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_2))?);
     bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_3))?);
+    bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_4))?);
     bytes.extend_from_slice(&encode_tze(&encoded_proof_to_wire(&req.proof)?)?);
     bytes.extend_from_slice(&encode_tze(&encoded_note_to_wire(&req.enc_1)?)?);
     bytes.extend_from_slice(&encode_tze(&encoded_note_to_wire(&req.enc_2)?)?);
     bytes.extend_from_slice(&encode_tze(&encoded_note_to_wire(&req.enc_3)?)?);
+    bytes.extend_from_slice(&encode_tze(&encoded_note_to_wire(&req.enc_4)?)?);
     Ok(WireKernelTransferReq { bytes })
 }
 
@@ -969,10 +983,12 @@ fn kernel_transfer_req_from_wire(wire: WireKernelTransferReq) -> Result<KernelTr
     let (rest, cm_1) = decode_tze_prefix::<WireFelt>(rest)?;
     let (rest, cm_2) = decode_tze_prefix::<WireFelt>(rest)?;
     let (rest, cm_3) = decode_tze_prefix::<WireFelt>(rest)?;
+    let (rest, cm_4) = decode_tze_prefix::<WireFelt>(rest)?;
     let (rest, proof) = decode_tze_prefix::<WireEncodedProof>(rest)?;
     let (rest, enc_1) = decode_tze_prefix::<WireEncodedNote>(rest)?;
     let (rest, enc_2) = decode_tze_prefix::<WireEncodedNote>(rest)?;
     let (rest, enc_3) = decode_tze_prefix::<WireEncodedNote>(rest)?;
+    let (rest, enc_4) = decode_tze_prefix::<WireEncodedNote>(rest)?;
     if !rest.is_empty() {
         return Err(format!(
             "kernel transfer payload left {} trailing bytes",
@@ -986,10 +1002,12 @@ fn kernel_transfer_req_from_wire(wire: WireKernelTransferReq) -> Result<KernelTr
         cm_1: wire_to_felt(cm_1)?,
         cm_2: wire_to_felt(cm_2)?,
         cm_3: wire_to_felt(cm_3)?,
+        cm_4: wire_to_felt(cm_4)?,
         proof: encoded_proof_from_wire(proof)?,
         enc_1: encoded_note_from_wire(enc_1)?,
         enc_2: encoded_note_from_wire(enc_2)?,
         enc_3: encoded_note_from_wire(enc_3)?,
+        enc_4: encoded_note_from_wire(enc_4)?,
     })
 }
 
@@ -1010,6 +1028,11 @@ fn transfer_resp_to_wire(resp: &TransferResp) -> Result<WireTransferResp, String
                 .try_into()
                 .map_err(|_| "transfer index_3 does not fit in u64".to_string())?,
         ),
+        index_4: u64_to_wire(
+            resp.index_4
+                .try_into()
+                .map_err(|_| "transfer index_4 does not fit in u64".to_string())?,
+        ),
     })
 }
 
@@ -1024,6 +1047,9 @@ fn transfer_resp_from_wire(wire: WireTransferResp) -> Result<TransferResp, Strin
         index_3: wire_to_u64(wire.index_3)?
             .try_into()
             .map_err(|_| "transfer index_3 does not fit in usize".to_string())?,
+        index_4: wire_to_u64(wire.index_4)?
+            .try_into()
+            .map_err(|_| "transfer index_4 does not fit in usize".to_string())?,
     })
 }
 
@@ -1037,10 +1063,18 @@ fn kernel_unshield_req_to_wire(req: &KernelUnshieldReq) -> Result<WireKernelUnsh
         value: req.recipient.clone(),
     })?);
     bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_change))?);
+    bytes.extend_from_slice(&encode_tze(&felt_to_wire(&req.cm_change_2))?);
     bytes.extend_from_slice(&encode_tze(&encoded_proof_to_wire(&req.proof)?)?);
     bytes.extend_from_slice(&encode_tze(&WireOptionalEncodedNote {
         note: req
             .enc_change
+            .as_ref()
+            .map(encoded_note_to_wire)
+            .transpose()?,
+    })?);
+    bytes.extend_from_slice(&encode_tze(&WireOptionalEncodedNote {
+        note: req
+            .enc_change_2
             .as_ref()
             .map(encoded_note_to_wire)
             .transpose()?,
@@ -1057,8 +1091,10 @@ fn kernel_unshield_req_from_wire(wire: WireKernelUnshieldReq) -> Result<KernelUn
     let (rest, fee) = decode_tze_prefix::<WireU64Le>(rest)?;
     let (rest, recipient) = decode_tze_prefix::<WireAccountId>(rest)?;
     let (rest, cm_change) = decode_tze_prefix::<WireFelt>(rest)?;
+    let (rest, cm_change_2) = decode_tze_prefix::<WireFelt>(rest)?;
     let (rest, proof) = decode_tze_prefix::<WireEncodedProof>(rest)?;
     let (rest, enc_change) = decode_tze_prefix::<WireOptionalEncodedNote>(rest)?;
+    let (rest, enc_change_2) = decode_tze_prefix::<WireOptionalEncodedNote>(rest)?;
     let (rest, cm_fee) = decode_tze_prefix::<WireFelt>(rest)?;
     let (rest, enc_fee) = decode_tze_prefix::<WireEncodedNote>(rest)?;
     if !rest.is_empty() {
@@ -1074,8 +1110,10 @@ fn kernel_unshield_req_from_wire(wire: WireKernelUnshieldReq) -> Result<KernelUn
         fee: wire_to_u64(fee)?,
         recipient: recipient.value,
         cm_change: wire_to_felt(cm_change)?,
+        cm_change_2: wire_to_felt(cm_change_2)?,
         proof: encoded_proof_from_wire(proof)?,
         enc_change: enc_change.note.map(encoded_note_from_wire).transpose()?,
+        enc_change_2: enc_change_2.note.map(encoded_note_from_wire).transpose()?,
         cm_fee: wire_to_felt(cm_fee)?,
         enc_fee: encoded_note_from_wire(enc_fee)?,
     })
@@ -1090,6 +1128,15 @@ fn unshield_resp_to_wire(resp: &UnshieldResp) -> Result<WireUnshieldResp, String
                     .try_into()
                     .map(u64_to_wire)
                     .map_err(|_| "change index does not fit in u64".to_string())
+            })
+            .transpose()?,
+        change_index_2: resp
+            .change_index_2
+            .map(|index| {
+                index
+                    .try_into()
+                    .map(u64_to_wire)
+                    .map_err(|_| "change_2 index does not fit in u64".to_string())
             })
             .transpose()?,
         producer_index: u64_to_wire(
@@ -1108,6 +1155,14 @@ fn unshield_resp_from_wire(wire: WireUnshieldResp) -> Result<UnshieldResp, Strin
                 wire_to_u64(index)?
                     .try_into()
                     .map_err(|_| "change index does not fit in usize".to_string())
+            })
+            .transpose()?,
+        change_index_2: wire
+            .change_index_2
+            .map(|index| {
+                wire_to_u64(index)?
+                    .try_into()
+                    .map_err(|_| "change_2 index does not fit in usize".to_string())
             })
             .transpose()?,
         producer_index: wire_to_u64(wire.producer_index)?
@@ -1226,7 +1281,9 @@ mod tests {
             cm_3: [6u8; 32],
             enc_1: sample_encrypted_note(0x11),
             enc_2: sample_encrypted_note(0x22),
-            enc_3: sample_encrypted_note(0x33),
+            enc_3: sample_encrypted_note(0x33).clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: sample_encrypted_note(0x33).clone(),
             proof: sample_kernel_stark_proof(),
         });
         let encoded = encode_kernel_inbox_message(&message).unwrap();
@@ -1331,7 +1388,9 @@ mod tests {
             cm_3: [6u8; 32],
             enc_1: sample_encrypted_note(0x11),
             enc_2: sample_encrypted_note(0x22),
-            enc_3: sample_encrypted_note(0x33),
+            enc_3: sample_encrypted_note(0x33).clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: sample_encrypted_note(0x33).clone(),
             proof: sample_kernel_stark_proof(),
         };
         let wire = kernel_transfer_req_to_wire(&req).unwrap();
@@ -1370,7 +1429,9 @@ mod tests {
             cm_3: [6u8; 32],
             enc_1: sample_encrypted_note(0x11),
             enc_2: sample_encrypted_note(0x22),
-            enc_3: sample_encrypted_note(0x33),
+            enc_3: sample_encrypted_note(0x33).clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: sample_encrypted_note(0x33).clone(),
             proof: sample_kernel_stark_proof(),
         };
         let wire = kernel_transfer_req_to_wire(&req).unwrap();
@@ -1412,6 +1473,8 @@ mod tests {
             recipient: "bob".into(),
             cm_change: [4u8; 32],
             enc_change: Some(sample_encrypted_note(0x33)),
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: [5u8; 32],
             enc_fee: sample_encrypted_note(0x44),
             proof: sample_kernel_stark_proof(),
@@ -1451,7 +1514,9 @@ mod tests {
             cm_3: [6u8; 32],
             enc_1: sample_encrypted_note(0x11),
             enc_2: sample_encrypted_note(0x22),
-            enc_3: sample_encrypted_note(0x33),
+            enc_3: sample_encrypted_note(0x33).clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: sample_encrypted_note(0x33).clone(),
             proof: sample_kernel_stark_proof(),
         });
         let encoded = encode_kernel_inbox_message(&message).unwrap();
@@ -1486,6 +1551,8 @@ mod tests {
             recipient: "bob".into(),
             cm_change: [4u8; 32],
             enc_change: Some(sample_encrypted_note(0x33)),
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: [5u8; 32],
             enc_fee: sample_encrypted_note(0x44),
             proof: sample_kernel_stark_proof(),
@@ -1637,6 +1704,8 @@ mod tests {
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: proof.clone(),
             };
 
@@ -1685,6 +1754,8 @@ mod tests {
                 recipient: recipient.clone(),
                 cm_change,
                 enc_change: enc_change.clone(),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee: enc_fee.clone(),
                 proof: proof.clone(),
@@ -1740,9 +1811,11 @@ mod tests {
                     index_1: transfer_index_1 as usize,
                     index_2: transfer_index_2 as usize,
                     index_3: transfer_index_3 as usize,
+                    index_4: transfer_index_3.wrapping_add(1) as usize,
                 }),
                 KernelResult::Unshield(UnshieldResp {
                     change_index: change_index.map(|x| x as usize),
+                    change_index_2: None,
                     producer_index: producer_note_index as usize,
                 }),
                 KernelResult::Error { message: message.clone() },
@@ -1884,6 +1957,8 @@ mod tests {
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: proof.clone(),
             };
             let transfer_host = kernel_transfer_req_to_host(&transfer);
@@ -1906,6 +1981,8 @@ mod tests {
                 recipient: recipient.clone(),
                 cm_change,
                 enc_change: enc_change.clone(),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee: enc_fee.clone(),
                 proof,
@@ -1945,7 +2022,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof,
             };
             let mut wire = kernel_transfer_req_to_wire(&req).unwrap();
@@ -1977,7 +2056,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof,
             };
             let mut wire = kernel_transfer_req_to_wire(&req).unwrap();
@@ -2009,6 +2090,8 @@ mod tests {
                 recipient,
                 cm_change,
                 enc_change,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof,
@@ -2041,6 +2124,8 @@ mod tests {
                 recipient,
                 cm_change,
                 enc_change,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof,

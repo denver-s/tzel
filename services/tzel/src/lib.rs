@@ -589,7 +589,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(
@@ -630,7 +632,9 @@ mod tests {
             cm_3,
             enc_1: fake_enc, // attacker swaps in a DIFFERENT encrypted note
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(
@@ -674,6 +678,8 @@ mod tests {
             recipient: TEST_ALT_L1_RECIPIENT.into(), // attacker redirects to themselves
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: fake_stark(preimage),
@@ -716,6 +722,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: fake_stark(preimage),
@@ -757,7 +765,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(
@@ -788,7 +798,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: Proof::TrustMeBro,
         });
         assert!(r.is_err());
@@ -810,7 +822,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: Proof::TrustMeBro,
         });
         assert!(r.is_err());
@@ -833,7 +847,9 @@ mod tests {
                 cm_3: cm_3a,
                 enc_1: enc.clone(),
                 enc_2: enc.clone(),
-                enc_3: enc_3a,
+                enc_3: enc_3a.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3a.clone(),
                 proof: Proof::TrustMeBro,
             })
             .unwrap();
@@ -848,7 +864,9 @@ mod tests {
             cm_3: cm_3b,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3: enc_3b,
+            enc_3: enc_3b.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3b.clone(),
             proof: Proof::TrustMeBro,
         });
         assert!(r.is_err());
@@ -869,7 +887,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: Proof::TrustMeBro,
         });
         assert!(r.is_err());
@@ -889,6 +909,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: Proof::TrustMeBro,
@@ -911,6 +933,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee: cm_fee_a,
                 enc_fee: enc_fee_a,
                 proof: Proof::TrustMeBro,
@@ -925,6 +949,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: cm_fee_b,
             enc_fee: enc_fee_b,
             proof: Proof::TrustMeBro,
@@ -946,6 +972,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: Proof::TrustMeBro,
@@ -981,7 +1009,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(r.is_err());
@@ -1022,7 +1052,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof,
         });
         assert!(r.is_err());
@@ -1051,7 +1083,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(r.is_err());
@@ -1087,6 +1121,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: fake_stark(preimage),
@@ -1126,6 +1162,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: fake_cm_change, // attacker substitutes a DIFFERENT change commitment
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: fake_stark(preimage),
@@ -1276,6 +1314,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: fake_stark(preimage),
@@ -1520,6 +1560,7 @@ mod tests {
             cm_1: random_felt(),
             cm_2: random_felt(),
             cm_3: random_felt(),
+            cm_4: ZERO,
             enc_1: EncryptedNote {
                 ct_d: vec![0; 1088],
                 tag: 42,
@@ -1539,6 +1580,14 @@ mod tests {
             enc_3: EncryptedNote {
                 ct_d: vec![0; 1088],
                 tag: 7,
+                ct_v: vec![0; 1088],
+                nonce: vec![0; NOTE_AEAD_NONCE_BYTES],
+                encrypted_data: vec![0; 1080],
+                outgoing_ct: empty_outgoing_recovery_ct(),
+            },
+            enc_4: EncryptedNote {
+                ct_d: vec![0; 1088],
+                tag: 0,
                 ct_v: vec![0; 1088],
                 nonce: vec![0; NOTE_AEAD_NONCE_BYTES],
                 encrypted_data: vec![0; 1080],
@@ -1713,7 +1762,9 @@ mod tests {
                 cm_3: random_felt(),
                 enc_1: bad_enc,
                 enc_2: enc,
-                enc_3: test_encrypted_note(0x41),
+                enc_3: test_encrypted_note(0x41).clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: test_encrypted_note(0x41).clone(),
                 proof: Proof::TrustMeBro,
             })
             .unwrap_err();
@@ -1733,6 +1784,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change: ZERO,
                 enc_change: Some(enc),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee: random_nonzero_felt(),
                 enc_fee: test_encrypted_note(0x42),
                 proof: Proof::TrustMeBro,
@@ -1767,7 +1820,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: fake_enc_2, // attacker swaps enc_2
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage),
         });
         assert!(r.is_err());
@@ -1787,6 +1842,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: Proof::TrustMeBro,
@@ -1809,7 +1866,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(vec![u(1), u(2)]),
         });
         assert!(r.is_err());
@@ -2109,7 +2168,9 @@ mod tests {
             cm_3: cm_3a,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3: enc_3a,
+            enc_3: enc_3a.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3a.clone(),
             proof: Proof::TrustMeBro,
         });
         assert!(r.is_err(), "N=8 transfer must be rejected");
@@ -2127,7 +2188,9 @@ mod tests {
             cm_3: cm_3b,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3: enc_3b,
+            enc_3: enc_3b.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3b.clone(),
             proof: Proof::TrustMeBro,
         });
         // Should NOT fail with "bad nullifier count" — may fail with "nullifier spent" or "invalid root"
@@ -2155,6 +2218,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: cm_fee_a,
             enc_fee: enc_fee_a,
             proof: Proof::TrustMeBro,
@@ -2172,6 +2237,8 @@ mod tests {
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: cm_fee_b,
             enc_fee: enc_fee_b,
             proof: Proof::TrustMeBro,
@@ -2213,6 +2280,8 @@ mod tests {
             enc_1: enc.clone(),
             enc_2: enc.clone(),
             enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(preimage.clone()),
         });
         assert!(
@@ -2232,7 +2301,9 @@ mod tests {
             cm_3,
             enc_1: enc.clone(),
             enc_2: enc.clone(),
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: fake_stark(bad_preimage),
         });
         assert!(r.is_err(), "swapped cm_1/cm_2 positions must be caught");
@@ -2597,6 +2668,8 @@ exit 2
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: Proof::TrustMeBro,
@@ -2637,6 +2710,8 @@ exit 2
             recipient: TEST_L1_RECIPIENT.into(),
             cm_change: random_felt(),
             enc_change: Some(enc_change),
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: Proof::TrustMeBro,

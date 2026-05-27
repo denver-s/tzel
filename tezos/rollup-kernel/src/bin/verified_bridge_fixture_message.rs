@@ -98,9 +98,11 @@ mod with_verifier {
             cm_1: req.cm_1,
             cm_2: req.cm_2,
             cm_3: req.cm_3,
+            cm_4: req.cm_4,
             enc_1: req.enc_1.clone(),
             enc_2: req.enc_2.clone(),
             enc_3: req.enc_3.clone(),
+            enc_4: req.enc_4.clone(),
             proof: kernel_proof_from_fixture(&req.proof),
         }
     }
@@ -114,6 +116,8 @@ mod with_verifier {
             recipient: req.recipient.clone(),
             cm_change: req.cm_change,
             enc_change: req.enc_change.clone(),
+            cm_change_2: req.cm_change_2,
+            enc_change_2: req.enc_change_2.clone(),
             cm_fee: req.cm_fee,
             enc_fee: req.enc_fee.clone(),
             proof: kernel_proof_from_fixture(&req.proof),

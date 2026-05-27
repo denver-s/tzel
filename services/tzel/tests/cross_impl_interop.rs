@@ -102,6 +102,8 @@ fn transfer_req(step: &InteropTransferStep, auth_domain: &F) -> TransferReq {
         enc_1: step.enc_1.clone(),
         enc_2: step.enc_2.clone(),
         enc_3: step.enc_3.clone(),
+        cm_4: ZERO, // Phase C placeholder
+        enc_4: step.enc_3.clone(),
         proof: Proof::Stark {
             proof_bytes: vec![1],
             output_preimage,
@@ -127,6 +129,8 @@ fn unshield_req(step: &InteropUnshieldStep, auth_domain: &F) -> UnshieldReq {
         recipient: step.recipient.clone(),
         cm_change: step.cm_change,
         enc_change: step.enc_change.clone(),
+        cm_change_2: ZERO,
+        enc_change_2: None,
         cm_fee: step.cm_fee,
         enc_fee: step.enc_fee.clone(),
         proof: Proof::Stark {

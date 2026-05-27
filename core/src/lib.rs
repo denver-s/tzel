@@ -1753,15 +1753,20 @@ pub struct TransferReq {
     #[serde(with = "hex_f_vec")]
     pub nullifiers: Vec<F>,
     pub fee: u64,
+    // Phase C: N→4 outputs.
+    //   cm_1 = recipient, cm_2 = change_1, cm_3 = change_2, cm_4 = producer fee.
     #[serde(with = "hex_f")]
     pub cm_1: F,
     #[serde(with = "hex_f")]
     pub cm_2: F,
     #[serde(with = "hex_f")]
     pub cm_3: F,
+    #[serde(with = "hex_f")]
+    pub cm_4: F,
     pub enc_1: EncryptedNote,
     pub enc_2: EncryptedNote,
     pub enc_3: EncryptedNote,
+    pub enc_4: EncryptedNote,
     pub proof: Proof,
 }
 
@@ -1770,6 +1775,7 @@ pub struct TransferResp {
     pub index_1: usize,
     pub index_2: usize,
     pub index_3: usize,
+    pub index_4: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1781,9 +1787,13 @@ pub struct UnshieldReq {
     pub v_pub: u64,
     pub fee: u64,
     pub recipient: String,
+    // Phase C: two change slots.
     #[serde(with = "hex_f")]
     pub cm_change: F,
     pub enc_change: Option<EncryptedNote>,
+    #[serde(with = "hex_f")]
+    pub cm_change_2: F,
+    pub enc_change_2: Option<EncryptedNote>,
     #[serde(with = "hex_f")]
     pub cm_fee: F,
     pub enc_fee: EncryptedNote,
@@ -1793,12 +1803,14 @@ pub struct UnshieldReq {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UnshieldResp {
     pub change_index: Option<usize>,
+    pub change_index_2: Option<usize>,
     pub producer_index: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct PreparedUnshield {
     change_note: Option<(F, EncryptedNote)>,
+    change_note_2: Option<(F, EncryptedNote)>,
     producer_note: (F, EncryptedNote),
     nullifiers: Vec<F>,
     recipient: String,
@@ -1808,6 +1820,10 @@ pub struct PreparedUnshield {
 impl PreparedUnshield {
     pub fn change_note(&self) -> Option<(&F, &EncryptedNote)> {
         self.change_note.as_ref().map(|(cm, enc)| (cm, enc))
+    }
+
+    pub fn change_note_2(&self) -> Option<(&F, &EncryptedNote)> {
+        self.change_note_2.as_ref().map(|(cm, enc)| (cm, enc))
     }
 
     pub fn producer_note(&self) -> (&F, &EncryptedNote) {
@@ -2416,10 +2432,11 @@ pub fn apply_transfer<S: LedgerState>(
         }
     }
 
-    state.ensure_note_capacity(3)?;
+    state.ensure_note_capacity(4)?;
     let index_1 = state.append_note(req.cm_1, req.enc_1.clone())?;
     let index_2 = state.append_note(req.cm_2, req.enc_2.clone())?;
     let index_3 = state.append_note(req.cm_3, req.enc_3.clone())?;
+    let index_4 = state.append_note(req.cm_4, req.enc_4.clone())?;
     for nf in &req.nullifiers {
         state.insert_nullifier(*nf)?;
     }
@@ -2429,6 +2446,7 @@ pub fn apply_transfer<S: LedgerState>(
         index_1,
         index_2,
         index_3,
+        index_4,
     })
 }
 
@@ -2528,7 +2546,8 @@ pub fn prepare_unshield<S: LedgerState>(
         }
     }
 
-    let additional_notes = usize::from(req.cm_change != ZERO) + 1;
+    let additional_notes =
+        usize::from(req.cm_change != ZERO) + usize::from(req.cm_change_2 != ZERO) + 1;
     state.ensure_note_capacity(additional_notes)?;
 
     Ok(PreparedUnshield {
@@ -2538,6 +2557,17 @@ pub fn prepare_unshield<S: LedgerState>(
                 req.enc_change
                     .as_ref()
                     .ok_or("change cm without encrypted note")?
+                    .clone(),
+            ))
+        } else {
+            None
+        },
+        change_note_2: if req.cm_change_2 != ZERO {
+            Some((
+                req.cm_change_2,
+                req.enc_change_2
+                    .as_ref()
+                    .ok_or("change_2 cm without encrypted note")?
                     .clone(),
             ))
         } else {
@@ -2578,6 +2608,11 @@ pub fn commit_prepared_unshield<S: LedgerState>(
     } else {
         None
     };
+    let change_index_2 = if let Some((cm, enc)) = prepared.change_note_2 {
+        Some(state.append_note(cm, enc)?)
+    } else {
+        None
+    };
 
     for nf in &prepared.nullifiers {
         state.insert_nullifier(*nf)?;
@@ -2587,6 +2622,7 @@ pub fn commit_prepared_unshield<S: LedgerState>(
     state.note_private_tx_applied();
     Ok(UnshieldResp {
         change_index,
+        change_index_2,
         producer_index,
     })
 }
@@ -4831,6 +4867,8 @@ mod tests {
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: fake_stark(vec![
                     auth_domain,
                     root,
@@ -4888,7 +4926,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: fake_stark(bootloader_wrapped_public_outputs(u(12345), public_outputs)),
             },
         )
@@ -4924,7 +4964,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: fake_stark(vec![
                     auth_domain,
                     root,
@@ -4972,6 +5014,8 @@ mod tests {
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: fake_stark(vec![
                     ZERO,
                     auth_domain,
@@ -5014,6 +5058,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change,
                 enc_change: Some(enc_change.clone()),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee: enc_fee.clone(),
                 proof: fake_stark(vec![
@@ -5077,6 +5123,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change,
                 enc_change: Some(enc_change),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: fake_stark(bootloader_wrapped_public_outputs(u(12345), public_outputs)),
@@ -5117,6 +5165,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change,
                 enc_change: Some(enc_change.clone()),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee: enc_fee.clone(),
                 proof: fake_stark(vec![
@@ -5160,6 +5210,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5199,6 +5251,8 @@ mod tests {
                 recipient: "bob".into(),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5232,6 +5286,8 @@ mod tests {
                 recipient: format!(" {} ", TEST_L1_RECIPIENT),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5394,7 +5450,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: Proof::TrustMeBro,
             },
         )
@@ -5430,7 +5488,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: Proof::TrustMeBro,
             },
         )
@@ -5468,7 +5528,9 @@ mod tests {
                 cm_3,
                 enc_1,
                 enc_2,
-                enc_3,
+                enc_3: enc_3.clone(),
+                cm_4: ZERO, // Phase C placeholder
+                enc_4: enc_3.clone(),
                 proof: Proof::TrustMeBro,
             },
         )
@@ -5499,6 +5561,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5533,6 +5597,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change: ZERO,
                 enc_change: None,
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5571,6 +5637,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change,
                 enc_change: Some(enc_change),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,
@@ -5609,6 +5677,8 @@ mod tests {
                 recipient: TEST_L1_RECIPIENT.into(),
                 cm_change,
                 enc_change: Some(enc_change),
+                cm_change_2: ZERO,
+                enc_change_2: None,
                 cm_fee,
                 enc_fee,
                 proof: Proof::TrustMeBro,

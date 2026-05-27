@@ -304,7 +304,9 @@ fn build_fixture() -> Result<VerifiedBridgeFixture, String> {
             cm_3: transfer_cm_producer,
             enc_1: transfer_enc_change,
             enc_2: transfer_enc_bob,
-            enc_3: transfer_enc_producer,
+            enc_3: transfer_enc_producer.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: transfer_enc_producer.clone(),
             proof: transfer_proof,
         },
         unshield: UnshieldReq {
@@ -315,6 +317,8 @@ fn build_fixture() -> Result<VerifiedBridgeFixture, String> {
             recipient: WITHDRAWAL_RECIPIENT.into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee: unshield_fee_cm,
             enc_fee: unshield_fee_enc,
             proof: unshield_proof,

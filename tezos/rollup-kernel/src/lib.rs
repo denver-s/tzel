@@ -1211,6 +1211,15 @@ fn prepare_durable_unshield_commit<H: Host>(
     } else {
         None
     };
+    let change_index_2 = if let Some((cm, enc)) = prepared.change_note_2() {
+        let index = tree_size;
+        encoded_notes.push((index, encode_published_note(cm, enc)?));
+        let _ = simulate_frontier_append(&ledger.zero_hashes, &mut branches, index, *cm)?;
+        tree_size += 1;
+        Some(usize::try_from(index).map_err(|_| "note index does not fit in usize".to_string())?)
+    } else {
+        None
+    };
     let (producer_cm, producer_enc) = prepared.producer_note();
     let producer_index_u64 = tree_size;
     encoded_notes.push((
@@ -1257,6 +1266,7 @@ fn prepare_durable_unshield_commit<H: Host>(
         root_marker,
         response: UnshieldResp {
             change_index,
+            change_index_2,
             producer_index,
         },
     })
@@ -2571,6 +2581,8 @@ mod tests {
             enc_1: enc_1.clone(),
             enc_2: enc_2.clone(),
             enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: sample_kernel_test_proof(),
         };
         let message = encode_external_kernel_message(&KernelInboxMessage::Transfer(req));
@@ -2587,6 +2599,7 @@ mod tests {
                 index_1,
                 index_2,
                 index_3,
+                index_4,
             }) => {
                 assert_eq!((index_1, index_2, index_3), (0, 1, 2))
             }
@@ -2634,7 +2647,9 @@ mod tests {
             cm_3,
             enc_1,
             enc_2,
-            enc_3,
+            enc_3: enc_3.clone(),
+            cm_4: ZERO, // Phase C placeholder
+            enc_4: enc_3.clone(),
             proof: sample_kernel_test_proof(),
         };
         let message = encode_external_kernel_message(&KernelInboxMessage::Transfer(req));
@@ -2681,6 +2696,8 @@ mod tests {
             recipient: recipient.clone(),
             cm_change,
             enc_change: Some(enc_change.clone()),
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee: enc_fee.clone(),
             proof: sample_kernel_test_proof(),
@@ -2696,7 +2713,7 @@ mod tests {
 
         match read_last_result(&host).unwrap() {
             KernelResult::Unshield(UnshieldResp {
-                change_index,
+                change_index, change_index_2,
                 producer_index,
             }) => {
                 assert_eq!(change_index, Some(0));
@@ -2747,6 +2764,8 @@ mod tests {
             recipient: recipient.clone(),
             cm_change,
             enc_change: Some(enc_change),
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: sample_kernel_test_proof(),
@@ -2794,6 +2813,8 @@ mod tests {
             recipient: "bob".into(),
             cm_change: ZERO,
             enc_change: None,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: sample_kernel_test_proof(),
@@ -2839,8 +2860,10 @@ mod tests {
                 " tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx ",
                 ZERO,
                 None,
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee,
+                enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -2862,7 +2885,7 @@ mod tests {
         assert_eq!(host.outputs.len(), 1);
         match read_last_result(&host).unwrap() {
             KernelResult::Unshield(UnshieldResp {
-                change_index,
+                change_index, change_index_2,
                 producer_index,
             }) => {
                 assert_eq!(change_index, None);
@@ -2894,8 +2917,10 @@ mod tests {
                 sample_l1_receiver(),
                 cm_change,
                 Some(enc_change.clone()),
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee.clone(),
+                enc_fee.clone()
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -2907,7 +2932,7 @@ mod tests {
 
         match read_last_result(&host).unwrap() {
             KernelResult::Unshield(UnshieldResp {
-                change_index,
+                change_index, change_index_2,
                 producer_index,
             }) => {
                 assert_eq!(change_index, Some(0));
@@ -2963,8 +2988,10 @@ mod tests {
                 sample_l1_receiver(),
                 ZERO,
                 None,
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee,
+                enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -3005,8 +3032,10 @@ mod tests {
                 sample_l1_receiver(),
                 ZERO,
                 None,
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee,
+                enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -3050,8 +3079,10 @@ mod tests {
                 "not-a-contract",
                 ZERO,
                 None,
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee,
+                enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -3092,8 +3123,10 @@ mod tests {
                 sample_l1_receiver(),
                 ZERO,
                 None,
+                ZERO,
+                None,
                 first_cm_fee,
-                first_enc_fee,
+                first_enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -3116,8 +3149,10 @@ mod tests {
                 sample_l1_receiver(),
                 ZERO,
                 None,
+                ZERO,
+                None,
                 second_cm_fee,
-                second_enc_fee,
+                second_enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -3169,8 +3204,10 @@ mod tests {
                 sample_l1_receiver(),
                 ZERO,
                 None,
+                ZERO,
+                None,
                 cm_fee,
-                enc_fee,
+                enc_fee
             )));
         host.inputs.push_back(InputMessage {
             level: 6,
@@ -4051,6 +4088,8 @@ mod tests {
         recipient: &str,
         cm_change: F,
         enc_change: Option<EncryptedNote>,
+        cm_change_2: F,
+        enc_change_2: Option<EncryptedNote>,
         cm_fee: F,
         enc_fee: EncryptedNote,
     ) -> KernelUnshieldReq {
@@ -4062,6 +4101,8 @@ mod tests {
             recipient: recipient.into(),
             cm_change,
             enc_change,
+            cm_change_2: ZERO,
+            enc_change_2: None,
             cm_fee,
             enc_fee,
             proof: sample_kernel_test_proof(),

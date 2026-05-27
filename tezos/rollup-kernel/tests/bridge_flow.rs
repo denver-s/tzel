@@ -932,6 +932,8 @@ fn kernel_transfer_req_from_fixture(req: &TransferReq) -> KernelTransferReq {
         enc_1: req.enc_1.clone(),
         enc_2: req.enc_2.clone(),
         enc_3: req.enc_3.clone(),
+        cm_4: ZERO, // Phase C placeholder
+        enc_4: req.enc_3.clone(),
         proof: kernel_proof_from_fixture(&req.proof),
     }
 }
@@ -946,6 +948,8 @@ fn kernel_unshield_req_from_fixture(req: &UnshieldReq) -> KernelUnshieldReq {
         recipient: req.recipient.clone(),
         cm_change: req.cm_change,
         enc_change: req.enc_change.clone(),
+        cm_change_2: ZERO,
+        enc_change_2: None,
         cm_fee: req.cm_fee,
         enc_fee: req.enc_fee.clone(),
         proof: kernel_proof_from_fixture(&req.proof),
