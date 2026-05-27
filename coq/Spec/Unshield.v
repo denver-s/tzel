@@ -108,6 +108,17 @@ Section PhiUnshield.
       (cm d_j v asset rcm owner_tag : Felt) : Prop :=
     cm = H_commit d_j v asset rcm owner_tag.
 
+  (** 7b. Input commitment well-formedness (per input).  Same as
+      [Spec.Transfer.phi_input_wellformed]; included here for
+      symmetry of the Phi assembly.  Binds each input's witness
+      [(d_j, v, asset, rcm, otag)] to its [cm], which is then used
+      as the leaf in the Merkle inclusion check.  Without this,
+      witness values for v / asset are unbound and the per-asset
+      balance can be cooked. *)
+  Definition phi_unshield_input_wellformed
+      (cm d_j v asset rcm owner_tag : Felt) : Prop :=
+    cm = H_commit d_j v asset rcm owner_tag.
+
   (** 8. Sighash completeness.
 
       Cairo (multiasset): sighash = fold(0x02, auth_domain, root,
@@ -139,5 +150,14 @@ Section PhiUnshield.
   Definition phi_unshield_input_lists_parallel
       (input_assets : list Felt) (input_values : list nat) : Prop :=
     length input_assets = length input_values.
+
+  (** 10. Output list well-formedness (parallel asset / value lists).
+      Unshield has exactly 3 private output slots (change_1,
+      change_2, producer), so both lists must have length 3; this
+      conjunct enforces parallelism, the count invariant is
+      Relation-level. *)
+  Definition phi_unshield_output_lists_parallel
+      (output_assets : list Felt) (output_values : list nat) : Prop :=
+    length output_assets = length output_values.
 
 End PhiUnshield.

@@ -177,6 +177,25 @@ Section PhiTransfer.
       (cm d_j v asset rcm owner_tag : Felt) : Prop :=
     cm = H_commit d_j v asset rcm owner_tag.
 
+  (** 4b. Input commitment well-formedness: each spent note's
+      commitment is correctly reconstructed from witness fields,
+      INCLUDING the asset tag.
+
+      Cairo (multiasset): [assert(hash::commit(d_j_i, v_i, asset_i,
+      rcm_i, otag_i) == cm_i, 'transfer: bad input cm')] for each
+      input, before the Merkle inclusion check uses [cm_i] as the
+      leaf.
+
+      Without this, the [cm_i] used in the Merkle path could
+      correspond to a real on-chain note while the witness fields
+      lie about that note's asset / value, breaking
+      [phi_value_conservation] by injecting unbacked balance into an
+      arbitrary asset's accumulator.  This is the input-side dual
+      of the asset-substitution bug guarded by [phi_output_wellformed]. *)
+  Definition phi_input_wellformed
+      (cm d_j v asset rcm owner_tag : Felt) : Prop :=
+    cm = H_commit d_j v asset rcm owner_tag.
+
   (** 5. Producer fee asset must be tez.
 
       The producer-fee note is intended for the DAL slot publisher
@@ -210,9 +229,25 @@ Section PhiTransfer.
       are parallel lists of the same length.  Structural — required
       so [sum_at] interprets them coherently.  In Cairo this is
       ensured by reading both fields from the same per-input witness
-      record. *)
+      record.
+
+      Without parallel-length enforcement, [sum_at] silently truncates
+      to the shorter list — a prover could pad [input_values] with
+      extra entries that contribute to balance without corresponding
+      asset tags, or vice versa.  This becomes a value-creation
+      vulnerability through the asymmetry. *)
   Definition phi_input_lists_parallel
       (input_assets : list Felt) (input_values : list nat) : Prop :=
     length input_assets = length input_values.
+
+  (** 9. Output list well-formedness: [output_assets] and
+      [output_values] are parallel lists of the same length.  The
+      transfer circuit has exactly 4 output slots, so both lists must
+      have length 4; this conjunct only enforces parallelism.  The
+      count = 4 invariant is structural (the Cairo struct has 4
+      slots) and is enforced at the Relation-assembly layer. *)
+  Definition phi_output_lists_parallel
+      (output_assets : list Felt) (output_values : list nat) : Prop :=
+    length output_assets = length output_values.
 
 End PhiTransfer.
