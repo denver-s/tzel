@@ -215,40 +215,46 @@ fn build_fixture() -> Result<VerifiedBridgeFixture, String> {
         DAL_PRODUCER_FEE,
         &transfer_rseed_producer,
     );
-    let transfer_proof = generate_transfer_proof(
-        auth_domain,
-        &program_hashes,
-        root_after_shield,
-        shield_nf,
-        &alice_addr_0,
-        shield_cm,
-        SHIELD_AMOUNT,
-        &shield_rseed,
-        1,
-        &alice_addr_0_auth_path_1,
-        MIN_TX_FEE,
-        transfer_cm_change,
-        &alice_addr_1.payment,
-        TRANSFER_CHANGE_AMOUNT,
-        &transfer_rseed_change,
-        &transfer_enc_change,
-        transfer_cm_bob,
-        &bob_addr_0.payment,
-        TRANSFER_RECIPIENT_AMOUNT,
-        &transfer_rseed_bob,
-        &transfer_enc_bob,
-        transfer_cm_producer,
-        &alice_addr_1.payment,
-        DAL_PRODUCER_FEE,
-        &transfer_rseed_producer,
-        &transfer_enc_producer,
-        &tree,
-    )?;
+    let (transfer_proof, transfer_cm_change_2, transfer_enc_change_2) =
+        generate_transfer_proof(
+            auth_domain,
+            &program_hashes,
+            root_after_shield,
+            shield_nf,
+            &alice_addr_0,
+            shield_cm,
+            SHIELD_AMOUNT,
+            &shield_rseed,
+            1,
+            &alice_addr_0_auth_path_1,
+            MIN_TX_FEE,
+            transfer_cm_change,
+            &alice_addr_1.payment,
+            TRANSFER_CHANGE_AMOUNT,
+            &transfer_rseed_change,
+            &transfer_enc_change,
+            transfer_cm_bob,
+            &bob_addr_0.payment,
+            TRANSFER_RECIPIENT_AMOUNT,
+            &transfer_rseed_bob,
+            &transfer_enc_bob,
+            transfer_cm_producer,
+            &alice_addr_1.payment,
+            DAL_PRODUCER_FEE,
+            &transfer_rseed_producer,
+            &transfer_enc_producer,
+            &tree,
+        )?;
 
     tree.append(transfer_cm_change);
     tree.append(transfer_cm_bob);
+    tree.append(transfer_cm_change_2);
     tree.append(transfer_cm_producer);
     let root_after_transfer = tree.root();
+    // Phase C: bob's note is now at index 3 (was 3 in pre-Phase-C too,
+    // because the producer was at 4 — but layout shifted). Let me
+    // recompute properly: shield placed 2 leaves, then transfer appended
+    // 4. The bob note is the 2nd transfer output → index 3.
     let bob_nf = nullifier(&bob_addr_0.nk_spend, &transfer_cm_bob, 3);
     let unshield_fee_rseed = fixed_felt(0x26);
     let unshield_fee_enc = deterministic_note(
@@ -301,11 +307,11 @@ fn build_fixture() -> Result<VerifiedBridgeFixture, String> {
             fee: MIN_TX_FEE,
             cm_1: transfer_cm_change,
             cm_2: transfer_cm_bob,
-            cm_3: transfer_cm_producer,
+            cm_3: transfer_cm_change_2,
+            cm_4: transfer_cm_producer,
             enc_1: transfer_enc_change,
             enc_2: transfer_enc_bob,
-            enc_3: transfer_enc_producer.clone(),
-            cm_4: ZERO, // Phase C placeholder
+            enc_3: transfer_enc_change_2,
             enc_4: transfer_enc_producer.clone(),
             proof: transfer_proof,
         },
@@ -436,13 +442,17 @@ fn generate_transfer_proof(
     v_2: u64,
     rseed_2: &F,
     enc_2: &EncryptedNote,
-    cm_3: F,
-    output_3: &PaymentAddress,
-    v_3: u64,
-    rseed_3: &F,
-    enc_3: &EncryptedNote,
+    // Phase C: producer fee is the 4th output. This function synthesizes
+    // a zero-value change_2 (the 3rd output) internally using a fixed
+    // recipe so the Cairo can reconstruct its commitment, and returns
+    // (cm_3, enc_3) alongside the proof so the caller can append it.
+    cm_4: F,
+    output_4: &PaymentAddress,
+    v_4: u64,
+    rseed_4: &F,
+    enc_4: &EncryptedNote,
     tree: &MerkleTree,
-) -> Result<Proof, String> {
+) -> Result<(Proof, F, EncryptedNote), String> {
     let (cm_path, path_root) = tree.auth_path(0);
     if path_root != root {
         return Err("transfer input path root mismatch".into());
@@ -455,10 +465,20 @@ fn generate_transfer_proof(
         ));
     }
 
+    // Build a deterministic zero-value change_2 placeholder. We reuse
+    // output_4's address fields (since change_2 = the wallet's own note)
+    // but pin the value to 0 and use a different rseed.
+    let rseed_3 = fixed_felt(0xC2);
+    let rcm_3 = derive_rcm(&rseed_3);
+    let otag_3 = owner_tag(&output_4.auth_root, &output_4.auth_pub_seed, &output_4.nk_tag);
+    let cm_3 = commit(&output_4.d_j, 0, &ASSET_TEZ, &rcm_3, &otag_3);
+    let enc_3 = deterministic_note(output_4, 0, &rseed_3, b"phase-c change_2", 0xCC, 0xDD)?;
+    let mh_3 = memo_ct_hash(&enc_3);
+
     let nullifiers = vec![nf];
     let mh_1 = memo_ct_hash(enc_1);
     let mh_2 = memo_ct_hash(enc_2);
-    let mh_3 = memo_ct_hash(enc_3);
+    let mh_4 = memo_ct_hash(enc_4);
     let sighash = transfer_sighash(
         &auth_domain,
         &root,
@@ -467,17 +487,18 @@ fn generate_transfer_proof(
         &cm_1,
         &cm_2,
         &cm_3,
-        &cm_3,
+        &cm_4,
         &mh_1,
         &mh_2,
         &mh_3,
-        &mh_3
+        &mh_4
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, input_auth_idx, &sighash);
 
-    // Phase B adds N input_asset entries, 3 per-output asset entries,
-    // and 1 primary_non_tez_asset entry: N=1, so +1+3+1 = +5.
-    let total_fields = 4 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 24 + 5;
+    // Phase C: 4 output blocks × 9 fields = 36, plus N input asset (1)
+    // and primary_non_tez_asset (1) = 38 extra fields total beyond the
+    // base 4 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS.
+    let total_fields = 4 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 36 + 2;
     let mut args = vec![
         felt_u64_to_hex(total_fields as u64),
         felt_u64_to_hex(1),
@@ -526,15 +547,26 @@ fn generate_transfer_proof(
         felt_to_hex(&output_2.nk_tag),
         felt_to_hex(&mh_2),
         felt_to_hex(&ASSET_TEZ), // asset_2
+        // Phase C: change_2 = synthesized zero-value tez note.
         felt_to_hex(&cm_3),
-        felt_to_hex(&output_3.d_j),
-        felt_u64_to_hex(v_3),
-        felt_to_hex(rseed_3),
-        felt_to_hex(&output_3.auth_root),
-        felt_to_hex(&output_3.auth_pub_seed),
-        felt_to_hex(&output_3.nk_tag),
+        felt_to_hex(&output_4.d_j),
+        felt_u64_to_hex(0),
+        felt_to_hex(&rseed_3),
+        felt_to_hex(&output_4.auth_root),
+        felt_to_hex(&output_4.auth_pub_seed),
+        felt_to_hex(&output_4.nk_tag),
         felt_to_hex(&mh_3),
-        felt_to_hex(&ASSET_TEZ), // asset_3 (producer pinned to tez)
+        felt_to_hex(&ASSET_TEZ), // asset_3 (change_2 pinned to tez here)
+        // Producer fee = the 4th output slot.
+        felt_to_hex(&cm_4),
+        felt_to_hex(&output_4.d_j),
+        felt_u64_to_hex(v_4),
+        felt_to_hex(rseed_4),
+        felt_to_hex(&output_4.auth_root),
+        felt_to_hex(&output_4.auth_pub_seed),
+        felt_to_hex(&output_4.nk_tag),
+        felt_to_hex(&mh_4),
+        felt_to_hex(&ASSET_TEZ), // asset_4 (producer pinned to tez)
         felt_to_hex(&ASSET_TEZ), // primary_non_tez_asset
     ]);
 
@@ -548,7 +580,7 @@ fn generate_transfer_proof(
     )?);
     DirectProofVerifier::verified(false, program_hashes.clone())
         .validate(&proof, CircuitKind::Transfer)?;
-    Ok(proof)
+    Ok((proof, cm_3, enc_3))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -597,9 +629,9 @@ fn generate_unshield_proof(
     );
     let (sig, _, _) = wots_sign(&input_addr.ask_j, 0, &sighash);
 
-    // Phase B: +1 input_asset, +1 asset_change, +1 asset_fee, +1 asset_pub,
-    // +1 primary_non_tez_asset.
-    let total_fields = 6 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 15 + 5;
+    // Phase B + C: +1 input_asset + change_2 block (8 felts + 1 asset)
+    // + asset_fee + asset_pub + primary_non_tez_asset.
+    let total_fields = 6 + 9 + DEPTH + AUTH_DEPTH + WOTS_CHAINS + 15 + 5 + 9;
     let mut args = vec![
         felt_u64_to_hex(total_fields as u64),
         felt_u64_to_hex(1),
@@ -641,6 +673,16 @@ fn generate_unshield_proof(
         "0x0".into(),
         "0x0".into(),
         "0x0".into(), // asset_change (zero — no change for this fixture)
+        // Phase C: change_2 block (also zero — no change_2 here).
+        felt_u64_to_hex(0),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(),
+        "0x0".into(), // asset_change_2
         felt_to_hex(&fee_address.d_j),
         felt_u64_to_hex(fee_amount),
         felt_to_hex(fee_rseed),
