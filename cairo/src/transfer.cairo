@@ -1643,6 +1643,85 @@ mod tests {
         run_verify(@fixture);
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Multiasset Phase B/C mutation tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// asset_4 must be ASSET_TEZ — pinning the producer fee to tez is a
+    /// permanent constraint (DAL slot publishers need liquid revenue).
+    #[test]
+    #[should_panic(expected: ('transfer: producer must be tez',))]
+    fn test_transfer_rejects_producer_with_non_tez_asset() {
+        let mut fixture = build_fixture();
+        fixture.asset_4 = 0xDEADBEEF;
+        run_verify(@fixture);
+    }
+
+    /// asset_1 must be in {ASSET_TEZ, primary_non_tez_asset}.
+    /// A "rogue" 3rd asset class is rejected.
+    #[test]
+    #[should_panic(expected: ('transfer: bad asset_1',))]
+    fn test_transfer_rejects_recipient_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        // Set primary asset to A. Recipient asset = B (different).
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_1 = 0xB;
+        run_verify(@fixture);
+    }
+
+    /// asset_2 (change_1) must be in {tez, primary}.
+    #[test]
+    #[should_panic(expected: ('transfer: bad asset_2',))]
+    fn test_transfer_rejects_change_1_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_2 = 0xC;
+        run_verify(@fixture);
+    }
+
+    /// asset_3 (change_2) must be in {tez, primary}.
+    #[test]
+    #[should_panic(expected: ('transfer: bad asset_3',))]
+    fn test_transfer_rejects_change_2_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_3 = 0xD;
+        run_verify(@fixture);
+    }
+
+    /// Per-input asset must be in {tez, primary}.
+    /// Substituting a 3rd asset for the input is rejected.
+    #[test]
+    #[should_panic(expected: ('transfer: bad input asset',))]
+    fn test_transfer_rejects_input_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.input_asset_list = array![0xB];
+        run_verify(@fixture);
+    }
+
+    /// Producer fee v_4 > 0.
+    /// A zero-value producer fee is rejected.
+    #[test]
+    #[should_panic(expected: ('transfer prod fee',))]
+    fn test_transfer_rejects_zero_producer_fee() {
+        let fixture = build_fixture_with_values(70_u64, 42_u64, 23_u64, 0_u64);
+        run_verify(@fixture);
+    }
+
+    /// asset_4 substitution that ALSO satisfies the in-set constraint
+    /// (= primary_non_tez_asset) is still rejected by the producer-tez
+    /// pin. This proves the producer pin is independent of the
+    /// in-set check.
+    #[test]
+    #[should_panic(expected: ('transfer: producer must be tez',))]
+    fn test_transfer_rejects_non_tez_producer_even_if_in_pair() {
+        let mut fixture = build_fixture();
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_4 = 0xA; // would satisfy in-set, but producer must be tez
+        run_verify(@fixture);
+    }
+
     #[test]
     #[should_panic(expected: ('xmss auth root mismatch',))]
     fn test_transfer_rejects_second_input_auth_path_mutation() {

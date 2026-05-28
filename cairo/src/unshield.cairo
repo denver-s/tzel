@@ -1290,4 +1290,59 @@ mod tests {
         let fixture = build_duplicate_nf_fixture();
         run_verify(@fixture);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Multiasset Phase B/C mutation tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// asset_pub must equal ASSET_TEZ in v1 (single tez bridge).
+    #[test]
+    #[should_panic(expected: ('unshield: v1 tez exit only',))]
+    fn test_unshield_rejects_non_tez_exit_asset_in_v1() {
+        let mut fixture = build_fixture();
+        fixture.asset_pub = 0xDEADBEEF;
+        run_verify(@fixture);
+    }
+
+    /// asset_fee (producer) must be ASSET_TEZ — permanent constraint.
+    #[test]
+    #[should_panic(expected: ('unshield: producer must be tez',))]
+    fn test_unshield_rejects_non_tez_producer_asset() {
+        let mut fixture = build_fixture();
+        fixture.asset_fee = 0xCAFEBABE;
+        run_verify(@fixture);
+    }
+
+    /// asset_change (slot 1) must be in {tez, primary}.
+    #[test]
+    #[should_panic(expected: ('unshield: bad asset_change',))]
+    fn test_unshield_rejects_change_1_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        // Force has_change = true so the slot has a real asset to check.
+        fixture.has_change = true;
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_change = 0xB;
+        run_verify(@fixture);
+    }
+
+    /// asset_change_2 (slot 2) must be in {tez, primary}.
+    #[test]
+    #[should_panic(expected: ('unshield: bad asset_change_2',))]
+    fn test_unshield_rejects_change_2_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        fixture.has_change_2 = true;
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.asset_change_2 = 0xC;
+        run_verify(@fixture);
+    }
+
+    /// Per-input asset must be in {tez, primary}.
+    #[test]
+    #[should_panic(expected: ('unshield: bad input asset',))]
+    fn test_unshield_rejects_input_asset_outside_pair() {
+        let mut fixture = build_fixture();
+        fixture.primary_non_tez_asset = 0xA;
+        fixture.input_asset_list = array![0xB];
+        run_verify(@fixture);
+    }
 }

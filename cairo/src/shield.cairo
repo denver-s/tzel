@@ -653,6 +653,39 @@ mod tests {
         run_verify(@fixture);
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // Multiasset Phase B mutation tests
+    // ═══════════════════════════════════════════════════════════════
+
+    /// asset_new must equal ASSET_TEZ in v1 (single tez bridge deployed).
+    #[test]
+    #[should_panic(expected: ('shield: v1 tez only',))]
+    fn test_shield_rejects_non_tez_recipient_asset_in_v1() {
+        let mut fixture = build_fixture();
+        fixture.asset_new = 0xFEEDFACE;
+        run_verify(@fixture);
+    }
+
+    /// asset_producer must be ASSET_TEZ — permanent constraint.
+    #[test]
+    #[should_panic(expected: ('shield: producer must be tez',))]
+    fn test_shield_rejects_non_tez_producer_asset() {
+        let mut fixture = build_fixture();
+        fixture.asset_producer = 0xBADBEEF;
+        run_verify(@fixture);
+    }
+
+    /// asset_new in the witness must match what the sighash binds.
+    /// Mutating asset_new without re-signing breaks the WOTS binding.
+    #[test]
+    #[should_panic(expected: ('shield: v1 tez only',))]
+    fn test_shield_rejects_asset_new_mutation_via_v1_pin() {
+        // For v1 the pin fires before the sighash check.
+        let mut fixture = build_fixture();
+        fixture.asset_new = 0xAA;
+        run_verify(@fixture);
+    }
+
     #[test]
     #[should_panic(expected: ('xmss auth root mismatch',))]
     fn test_shield_rejects_fee_public_mutation_via_signature_binding() {
