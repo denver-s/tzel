@@ -578,7 +578,7 @@ mod tests {
 
         // Build output_preimage as if the proof proved (root, nf, real_cm_1, cm_2, mh1, mh2)
         // but submit the request with fake_cm_1
-        let preimage = vec![root, nf, fee_f(), real_cm_1, cm_2, cm_3, ZERO, ZERO, mh_3];
+        let preimage = vec![root, nf, fee_f(), real_cm_1, cm_2, cm_3, ZERO, ZERO, ZERO, mh_3, ZERO];
 
         let result = ledger.transfer(&TransferReq {
             root,
@@ -621,7 +621,7 @@ mod tests {
         let (ek_atk, _) = kem_keygen_from_seed(&seed_atk);
         let fake_enc = encrypt_note(999, &random_felt(), None, &ek_atk, &ek_atk);
         // Output_preimage commits to mh_1 (real note's hash)
-        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, mh_1, ZERO, mh_3];
+        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, ZERO, mh_1, ZERO, mh_3, ZERO];
 
         let result = ledger.transfer(&TransferReq {
             root,
@@ -662,10 +662,13 @@ mod tests {
             root,
             nf,
             u(1000),
+            ASSET_TEZ, // asset_pub (Phase B)
             fee_f(),
             alice_recipient,
             ZERO,
             ZERO,
+            ZERO, // cm_change_2 (Phase C)
+            ZERO, // mh_change_2
             cm_fee,
             mh_fee,
         ];
@@ -706,8 +709,11 @@ mod tests {
             root,
             nf,
             u(100),
+            ASSET_TEZ,
             fee_f(),
             hash(TEST_L1_RECIPIENT.as_bytes()),
+            ZERO,
+            ZERO,
             ZERO,
             ZERO,
             cm_fee,
@@ -754,7 +760,7 @@ mod tests {
         let mh = ZERO;
 
         // Proof commits to the REAL nullifier
-        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, mh, mh, mh_3];
+        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, ZERO, mh, mh, mh_3, ZERO];
 
         let result = ledger.transfer(&TransferReq {
             root,
@@ -998,7 +1004,7 @@ mod tests {
         let mh = memo_ct_hash(&enc);
 
         // Proof commits to fake_root
-        let preimage = vec![fake_root, nf, fee_f(), cm_1, cm_2, cm_3, mh, mh, mh_3];
+        let preimage = vec![fake_root, nf, fee_f(), cm_1, cm_2, cm_3, ZERO, mh, mh, mh_3, ZERO];
 
         let r = ledger.transfer(&TransferReq {
             root, // request uses the REAL root
@@ -1037,9 +1043,11 @@ mod tests {
                 cm_1,
                 cm_2,
                 cm_3,
+                ZERO, // cm_4 (Phase C placeholder)
                 mh,
                 mh,
                 mh_3,
+                ZERO, // mh_4
             ],
         };
 
@@ -1072,7 +1080,7 @@ mod tests {
         let (cm_3, enc_3, mh_3) = test_output_note(0x32);
         let mh = memo_ct_hash(&enc);
 
-        let preimage = vec![root, nf, fee_f(), cm_1, real_cm_2, cm_3, mh, mh, mh_3];
+        let preimage = vec![root, nf, fee_f(), cm_1, real_cm_2, cm_3, ZERO, mh, mh, mh_3, ZERO];
 
         let r = ledger.transfer(&TransferReq {
             root,
@@ -1105,12 +1113,15 @@ mod tests {
             fake_root,
             nf,
             u(1000),
+            ASSET_TEZ,
             fee_f(),
             recipient,
             ZERO,
             ZERO,
+            ZERO,
+            ZERO,
             cm_fee,
-            mh_fee,
+            mh_fee
         ];
 
         let r = ledger.unshield(&UnshieldReq {
@@ -1146,12 +1157,15 @@ mod tests {
             root,
             nf,
             u(500),
+            ASSET_TEZ,
             fee_f(),
             recipient,
             real_cm_change,
             ZERO,
+            ZERO,
+            ZERO,
             cm_fee,
-            mh_fee,
+            mh_fee
         ];
 
         let result = ledger.unshield(&UnshieldReq {
@@ -1298,10 +1312,13 @@ mod tests {
             root,
             nf,
             u(1000),
+            ASSET_TEZ,
             fee_f(),
             recipient,
             ZERO,
             u(12345),
+            ZERO, // cm_change_2
+            ZERO, // mh_change_2
             cm_fee,
             ZERO,
         ];
@@ -1810,7 +1827,7 @@ mod tests {
         let (ek, _) = kem_keygen_from_seed(&seed);
         let fake_enc_2 = encrypt_note(100, &random_felt(), None, &ek, &ek);
 
-        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, mh_1, real_mh_2, mh_3];
+        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, ZERO, mh_1, real_mh_2, mh_3, ZERO];
         let r = ledger.transfer(&TransferReq {
             root,
             nullifiers: vec![nf],
@@ -2266,8 +2283,11 @@ mod tests {
         let mh_1 = memo_ct_hash(&enc);
         let mh_2 = memo_ct_hash(&enc);
 
-        // N=1: tail layout is [root, nf, fee, cm_1, cm_2, cm_3, mh_1, mh_2, mh_3]
-        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, mh_1, mh_2, mh_3];
+        // Phase C N=1 tail layout: auto-prepended auth_domain, then
+        // [root, nf, fee, cm_1, cm_2, cm_3, cm_4, mh_1, mh_2, mh_3, mh_4].
+        // The wallet uses cm_4: ZERO and enc_4: enc_3 as placeholders, so
+        // mh_4 = memo_ct_hash(enc_3) = mh_3.
+        let preimage = vec![root, nf, fee_f(), cm_1, cm_2, cm_3, ZERO, mh_1, mh_2, mh_3, mh_3];
 
         // This should succeed — all fields at correct positions
         let r = ledger.transfer(&TransferReq {
@@ -2291,7 +2311,7 @@ mod tests {
         );
 
         // Now test with preimage that has cm_1 and cm_2 SWAPPED in position
-        let bad_preimage = vec![root, nf, fee_f(), cm_2, cm_1, cm_3, mh_1, mh_2, mh_3];
+        let bad_preimage = vec![root, nf, fee_f(), cm_2, cm_1, cm_3, ZERO, mh_1, mh_2, mh_3, mh_3];
         let r = ledger.transfer(&TransferReq {
             root,
             nullifiers: vec![nf],

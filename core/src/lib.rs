@@ -2388,7 +2388,10 @@ pub fn apply_transfer<S: LedgerState>(
             proof_bytes: _,
             output_preimage,
         } => {
-            let expected_output_len = 2 + n + 7;
+            // Phase C: 4 cm's + 4 memos = +2 vs prior layout.
+            // Layout: auth_domain, root, nf_0..nf_{n-1}, fee,
+            //         cm_1, cm_2, cm_3, cm_4, memo_1, memo_2, memo_3, memo_4.
+            let expected_output_len = 2 + n + 9;
             let public_outputs = transition_public_outputs(output_preimage, expected_output_len)?;
             let tail = public_outputs;
 
@@ -2417,17 +2420,24 @@ pub fn apply_transfer<S: LedgerState>(
             if tail[cm1_pos + 2] != req.cm_3 {
                 return Err("proof cm_3 mismatch".into());
             }
+            if tail[cm1_pos + 3] != req.cm_4 {
+                return Err("proof cm_4 mismatch".into());
+            }
             let mh_1 = memo_ct_hash(&req.enc_1);
             let mh_2 = memo_ct_hash(&req.enc_2);
             let mh_3 = memo_ct_hash(&req.enc_3);
-            if tail[cm1_pos + 3] != mh_1 {
+            let mh_4 = memo_ct_hash(&req.enc_4);
+            if tail[cm1_pos + 4] != mh_1 {
                 return Err("proof memo_ct_hash_1 mismatch — encrypted note tampered".into());
             }
-            if tail[cm1_pos + 4] != mh_2 {
+            if tail[cm1_pos + 5] != mh_2 {
                 return Err("proof memo_ct_hash_2 mismatch — encrypted note tampered".into());
             }
-            if tail[cm1_pos + 5] != mh_3 {
+            if tail[cm1_pos + 6] != mh_3 {
                 return Err("proof memo_ct_hash_3 mismatch — encrypted note tampered".into());
+            }
+            if tail[cm1_pos + 7] != mh_4 {
+                return Err("proof memo_ct_hash_4 mismatch — encrypted note tampered".into());
             }
         }
     }
@@ -2501,7 +2511,12 @@ pub fn prepare_unshield<S: LedgerState>(
             proof_bytes: _,
             output_preimage,
         } => {
-            let expected_output_len = 2 + n + 7;
+            // Phase B + C unshield layout:
+            //   auth_domain, root, nf_0..nf_{n-1}, v_pub, asset_pub, fee,
+            //   recipient, cm_change_1, memo_change_1, cm_change_2,
+            //   memo_change_2, cm_fee, memo_fee.
+            // Length = 2 + n + 10.
+            let expected_output_len = 2 + n + 10;
             let public_outputs = transition_public_outputs(output_preimage, expected_output_len)?;
             let tail = public_outputs;
 
@@ -2519,28 +2534,43 @@ pub fn prepare_unshield<S: LedgerState>(
             if tail[2 + n] != u64_to_felt(req.v_pub) {
                 return Err("proof v_pub mismatch".into());
             }
-            if tail[3 + n] != u64_to_felt(req.fee) {
+            // asset_pub (v1: ASSET_TEZ)
+            if tail[3 + n] != ASSET_TEZ {
+                return Err("proof asset_pub mismatch — v1 requires tez".into());
+            }
+            if tail[4 + n] != u64_to_felt(req.fee) {
                 return Err("proof fee mismatch".into());
             }
-            if tail[4 + n] != hash(recipient.as_bytes()) {
+            if tail[5 + n] != hash(recipient.as_bytes()) {
                 return Err("proof recipient mismatch".into());
             }
-            if tail[5 + n] != req.cm_change {
+            if tail[6 + n] != req.cm_change {
                 return Err("proof cm_change mismatch".into());
             }
             if let Some(ref enc) = req.enc_change {
                 let mh = memo_ct_hash(enc);
-                if tail[6 + n] != mh {
+                if tail[7 + n] != mh {
                     return Err("proof memo_ct_hash_change mismatch".into());
                 }
-            } else if tail[6 + n] != ZERO {
+            } else if tail[7 + n] != ZERO {
                 return Err("proof memo_ct_hash_change should be 0 when no change".into());
             }
-            if tail[7 + n] != req.cm_fee {
+            if tail[8 + n] != req.cm_change_2 {
+                return Err("proof cm_change_2 mismatch".into());
+            }
+            if let Some(ref enc) = req.enc_change_2 {
+                let mh = memo_ct_hash(enc);
+                if tail[9 + n] != mh {
+                    return Err("proof memo_ct_hash_change_2 mismatch".into());
+                }
+            } else if tail[9 + n] != ZERO {
+                return Err("proof memo_ct_hash_change_2 should be 0 when no change_2".into());
+            }
+            if tail[10 + n] != req.cm_fee {
                 return Err("proof cm_fee mismatch".into());
             }
             let fee_mh = memo_ct_hash(&req.enc_fee);
-            if tail[8 + n] != fee_mh {
+            if tail[11 + n] != fee_mh {
                 return Err("proof memo_ct_hash_fee mismatch".into());
             }
         }
@@ -4853,7 +4883,10 @@ mod tests {
         let nf = nullifier(&nk_spend, &shield_resp.cm, shield_resp.index as u64);
         let (enc_1, cm_1) = deterministic_note(&addr, 60_000, u(21), Some(b"out-1"));
         let (enc_2, cm_2) = deterministic_note(&addr, 70_000, u(22), Some(b"out-2"));
-        let (enc_3, cm_3) = deterministic_note(&addr, 20_000, u(23), Some(b"dal"));
+        // Phase C: cm_3 is the change_2 slot (zero-value here), cm_4 is the
+        // producer fee.
+        let (enc_3, cm_3) = deterministic_note(&addr, 0, u(23), None);
+        let (enc_4, cm_4) = deterministic_note(&addr, 20_000, u(24), Some(b"dal"));
 
         let resp = apply_transfer(
             &mut ledger,
@@ -4864,11 +4897,11 @@ mod tests {
                 cm_1,
                 cm_2,
                 cm_3,
+                cm_4,
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
-                cm_4: ZERO, // Phase C placeholder
-                enc_4: enc_3.clone(),
+                enc_4: enc_4.clone(),
                 proof: fake_stark(vec![
                     auth_domain,
                     root,
@@ -4877,9 +4910,11 @@ mod tests {
                     cm_1,
                     cm_2,
                     cm_3,
+                    cm_4,
                     memo_ct_hash(&enc_1),
                     memo_ct_hash(&enc_2),
                     memo_ct_hash(&enc_3),
+                    memo_ct_hash(&enc_4),
                 ]),
             },
         )
@@ -4888,8 +4923,9 @@ mod tests {
         assert_eq!(resp.index_1, 2);
         assert_eq!(resp.index_2, 3);
         assert_eq!(resp.index_3, 4);
+        assert_eq!(resp.index_4, 5);
         assert!(ledger.nullifiers.contains(&nf));
-        assert_eq!(ledger.memos.len(), 5);
+        assert_eq!(ledger.memos.len(), 6);
         assert!(ledger.valid_roots.contains(&ledger.tree.root()));
     }
 
@@ -4901,7 +4937,8 @@ mod tests {
         let nf = nullifier(&nk_spend, &shield_resp.cm, shield_resp.index as u64);
         let (enc_1, cm_1) = deterministic_note(&addr, 60_000, u(24), Some(b"out-1"));
         let (enc_2, cm_2) = deterministic_note(&addr, 70_000, u(25), Some(b"out-2"));
-        let (enc_3, cm_3) = deterministic_note(&addr, 20_000, u(26), Some(b"dal"));
+        let (enc_3, cm_3) = deterministic_note(&addr, 0, u(26), None);
+        let (enc_4, cm_4) = deterministic_note(&addr, 20_000, u(27), Some(b"dal"));
 
         let public_outputs = vec![
             auth_domain,
@@ -4911,9 +4948,11 @@ mod tests {
             cm_1,
             cm_2,
             cm_3,
+            cm_4,
             memo_ct_hash(&enc_1),
             memo_ct_hash(&enc_2),
             memo_ct_hash(&enc_3),
+            memo_ct_hash(&enc_4),
         ];
         let resp = apply_transfer(
             &mut ledger,
@@ -4924,17 +4963,20 @@ mod tests {
                 cm_1,
                 cm_2,
                 cm_3,
+                cm_4,
                 enc_1,
                 enc_2,
-                enc_3: enc_3.clone(),
-                cm_4: ZERO, // Phase C placeholder
-                enc_4: enc_3.clone(),
+                enc_3,
+                enc_4,
                 proof: fake_stark(bootloader_wrapped_public_outputs(u(12345), public_outputs)),
             },
         )
         .unwrap();
 
-        assert_eq!((resp.index_1, resp.index_2, resp.index_3), (2, 3, 4));
+        assert_eq!(
+            (resp.index_1, resp.index_2, resp.index_3, resp.index_4),
+            (2, 3, 4, 5),
+        );
         assert!(ledger.nullifiers.contains(&nf));
     }
 
@@ -4962,10 +5004,10 @@ mod tests {
                 cm_1,
                 cm_2,
                 cm_3,
+                cm_4: ZERO,
                 enc_1,
                 enc_2,
                 enc_3: enc_3.clone(),
-                cm_4: ZERO, // Phase C placeholder
                 enc_4: enc_3.clone(),
                 proof: fake_stark(vec![
                     auth_domain,
@@ -4975,6 +5017,8 @@ mod tests {
                     cm_1,
                     cm_2,
                     cm_3,
+                    ZERO,
+                    ZERO,
                     ZERO,
                     ZERO,
                     ZERO,
@@ -4998,7 +5042,8 @@ mod tests {
         let nf = nullifier(&nk_spend, &shield_resp.cm, shield_resp.index as u64);
         let (enc_1, cm_1) = deterministic_note(&addr, 60_000, u(34), Some(b"out-1"));
         let (enc_2, cm_2) = deterministic_note(&addr, 70_000, u(35), Some(b"out-2"));
-        let (enc_3, cm_3) = deterministic_note(&addr, 20_000, u(36), Some(b"dal"));
+        let (enc_3, cm_3) = deterministic_note(&addr, 0, u(36), None);
+        let (enc_4, cm_4) = deterministic_note(&addr, 20_000, u(37), Some(b"dal"));
         let leaves_before = ledger.tree.leaves.clone();
         let memos_before = ledger.memos.len();
 
@@ -5011,11 +5056,11 @@ mod tests {
                 cm_1,
                 cm_2,
                 cm_3,
+                cm_4,
                 enc_1: enc_1.clone(),
                 enc_2: enc_2.clone(),
                 enc_3: enc_3.clone(),
-                cm_4: ZERO, // Phase C placeholder
-                enc_4: enc_3.clone(),
+                enc_4: enc_4.clone(),
                 proof: fake_stark(vec![
                     ZERO,
                     auth_domain,
@@ -5025,9 +5070,11 @@ mod tests {
                     cm_1,
                     cm_2,
                     cm_3,
+                    cm_4,
                     memo_ct_hash(&enc_1),
                     memo_ct_hash(&enc_2),
                     memo_ct_hash(&enc_3),
+                    memo_ct_hash(&enc_4),
                 ]),
             },
         )
@@ -5067,10 +5114,13 @@ mod tests {
                     root,
                     nf,
                     u(50),
+                    ASSET_TEZ, // asset_pub (Phase B)
                     u(MIN_TX_FEE),
                     hash(TEST_L1_RECIPIENT.as_bytes()),
                     cm_change,
                     memo_ct_hash(&enc_change),
+                    ZERO, // cm_change_2 (Phase C)
+                    ZERO, // mh_change_2
                     cm_fee,
                     memo_ct_hash(&enc_fee),
                 ]),
@@ -5106,10 +5156,13 @@ mod tests {
             root,
             nf,
             u(50),
+            ASSET_TEZ,
             u(MIN_TX_FEE),
             hash(TEST_L1_RECIPIENT.as_bytes()),
             cm_change,
             memo_ct_hash(&enc_change),
+            ZERO,
+            ZERO,
             cm_fee,
             memo_ct_hash(&enc_fee),
         ];
@@ -5175,10 +5228,13 @@ mod tests {
                     root,
                     nf,
                     u(50),
+                    ASSET_TEZ,
                     u(MIN_TX_FEE),
                     hash(TEST_L1_RECIPIENT.as_bytes()),
                     cm_change,
                     memo_ct_hash(&enc_change),
+                    ZERO,
+                    ZERO,
                     cm_fee,
                     memo_ct_hash(&enc_fee),
                 ]),

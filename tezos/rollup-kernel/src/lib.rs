@@ -2601,7 +2601,9 @@ mod tests {
                 index_3,
                 index_4,
             }) => {
-                assert_eq!((index_1, index_2, index_3), (0, 1, 2))
+                // Phase C: 4 outputs. cm_4 is the zero placeholder used
+                // by the test scaffold; cm_3 here is the producer fee.
+                assert_eq!((index_1, index_2, index_3, index_4), (0, 1, 2, 3))
             }
             KernelResult::Error { message } => {
                 panic!("transfer failed: {} | debug: {}", message, host.debug)
@@ -2610,11 +2612,12 @@ mod tests {
         }
 
         let ledger = read_ledger(&host).unwrap();
-        assert_eq!(ledger.tree.leaves, vec![cm_1, cm_2, cm_3]);
+        assert_eq!(ledger.tree.leaves, vec![cm_1, cm_2, cm_3, ZERO]);
         assert!(ledger.nullifiers.contains(&nf));
         assert!(read_persisted_note(&host, 0).is_some());
         assert!(read_persisted_note(&host, 1).is_some());
         assert!(read_persisted_note(&host, 2).is_some());
+        assert!(read_persisted_note(&host, 3).is_some());
         assert!(host.store.contains_key(&nullifier_path(&nf)));
         assert!(host.store.contains_key(&branch_path(0)));
         assert!(host.store.contains_key(&PATH_TREE_ROOT.to_vec()));

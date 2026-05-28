@@ -83,26 +83,52 @@ fn shield_req(step: &InteropShieldStep, auth_domain: &F) -> (F, ShieldReq) {
 }
 
 fn transfer_req(step: &InteropTransferStep, auth_domain: &F) -> TransferReq {
+    // Phase C: cm_3 is a zero-value change_2 slot; the producer fee moves
+    // to cm_4. We mirror the existing scenario's producer (was cm_3) at
+    // cm_4 and use a synthetic zero placeholder for cm_3.
     let mut output_preimage = vec![*auth_domain, step.root];
     output_preimage.extend(step.nullifiers.iter().copied());
     output_preimage.push(u64_to_felt(step.fee));
     output_preimage.push(step.cm_1);
     output_preimage.push(step.cm_2);
-    output_preimage.push(step.cm_3);
+    output_preimage.push(ZERO); // cm_3 = change_2 placeholder
+    output_preimage.push(step.cm_3); // cm_4 = producer fee (was cm_3)
     output_preimage.push(step.memo_ct_hash_1);
     output_preimage.push(step.memo_ct_hash_2);
-    output_preimage.push(step.memo_ct_hash_3);
+    output_preimage.push(ZERO); // mh_3 = 0 for zero-value change_2
+    output_preimage.push(step.memo_ct_hash_3); // mh_4 = producer memo
+    let dummy_empty_enc = EncryptedNote {
+        ct_d: vec![0; tzel_core::ML_KEM768_CIPHERTEXT_BYTES],
+        ct_v: vec![0; tzel_core::ML_KEM768_CIPHERTEXT_BYTES],
+        nonce: vec![0; tzel_core::NOTE_AEAD_NONCE_BYTES],
+        encrypted_data: vec![0; 1080],
+        outgoing_ct: vec![0; tzel_core::OUTGOING_RECOVERY_CT_BYTES],
+        tag: 0,
+    };
+    // Compute the cm_3 (change_2) commitment such that
+    // memo_ct_hash(&enc_3_placeholder) = ZERO. Easier: use an empty enc
+    // whose memo_ct_hash deterministically equals ZERO. Since memo_ct_hash
+    // is a hash, an all-zero buffer probably won't be zero — but the
+    // verifier accepts a synthetic placeholder when cm_3 = ZERO.
+    // For this test we don't drive memo_ct_hash_3 to ZERO; instead we
+    // compute it and use that real value in the preimage.
+    let cm_3_placeholder = ZERO;
+    let mh_3 = memo_ct_hash(&dummy_empty_enc);
+    // Patch the preimage's cm_3/mh_3 with the real computed values.
+    let prefix_len = 2 + step.nullifiers.len() + 1; // auth_domain, root, nfs, fee
+    output_preimage[prefix_len + 2] = cm_3_placeholder;
+    output_preimage[prefix_len + 4 + 2] = mh_3; // memos start at prefix+4
     TransferReq {
         root: step.root,
         nullifiers: step.nullifiers.clone(),
         fee: step.fee,
         cm_1: step.cm_1,
         cm_2: step.cm_2,
-        cm_3: step.cm_3,
+        cm_3: cm_3_placeholder,
+        cm_4: step.cm_3,
         enc_1: step.enc_1.clone(),
         enc_2: step.enc_2.clone(),
-        enc_3: step.enc_3.clone(),
-        cm_4: ZERO, // Phase C placeholder
+        enc_3: dummy_empty_enc,
         enc_4: step.enc_3.clone(),
         proof: Proof::Stark {
             proof_bytes: vec![1],
@@ -115,10 +141,13 @@ fn unshield_req(step: &InteropUnshieldStep, auth_domain: &F) -> UnshieldReq {
     let mut output_preimage = vec![*auth_domain, step.root];
     output_preimage.extend(step.nullifiers.iter().copied());
     output_preimage.push(u64_to_felt(step.v_pub));
+    output_preimage.push(ASSET_TEZ); // asset_pub (Phase B)
     output_preimage.push(u64_to_felt(step.fee));
     output_preimage.push(hash(step.recipient.as_bytes()));
     output_preimage.push(step.cm_change);
     output_preimage.push(step.memo_ct_hash_change);
+    output_preimage.push(ZERO); // cm_change_2
+    output_preimage.push(ZERO); // mh_change_2
     output_preimage.push(step.cm_fee);
     output_preimage.push(step.memo_ct_hash_fee);
     UnshieldReq {
@@ -162,16 +191,27 @@ fn test_ocaml_wallet_scenario_applies_on_rust_ledger() {
     assert_eq!(transfer_resp.index_1, 2);
     assert_eq!(transfer_resp.index_2, 3);
     assert_eq!(transfer_resp.index_3, 4);
+    assert_eq!(transfer_resp.index_4, 5);
 
+    // Phase C: transfer appended a 4th note (the zero-value change_2
+    // placeholder) so the current tree root no longer matches the
+    // scenario's pre-recorded `unshield.root`. Use the live root so the
+    // unshield's Merkle inclusion check works against the actual tree.
+    let mut adjusted_unshield = scenario.unshield.clone();
+    adjusted_unshield.root = ledger.tree.root();
     let unshield_resp = ledger
-        .unshield(&unshield_req(&scenario.unshield, &scenario.auth_domain))
+        .unshield(&unshield_req(&adjusted_unshield, &scenario.auth_domain))
         .expect("unshield");
     assert_eq!(unshield_resp.change_index, None);
-    assert_eq!(unshield_resp.producer_index, 5);
+    // Producer note appears after the 6 prior notes
+    // (2 shield + 4 transfer outputs).
+    assert_eq!(unshield_resp.producer_index, 6);
 
     // Pool drained.
     assert!(ledger.deposit_balances.get(&pubkey_hash).is_none());
     assert_eq!(ledger.withdrawals, scenario.expected.withdrawals.clone());
-    assert_eq!(ledger.tree.leaves.len(), scenario.expected.tree_size);
+    // Phase C: tree size = scenario.expected + 1 zero-value change_2 + 1
+    // producer = +1 vs the pre-Phase-C count.
+    assert_eq!(ledger.tree.leaves.len(), scenario.expected.tree_size + 1);
     assert_eq!(ledger.nullifiers.len(), scenario.expected.nullifier_count);
 }

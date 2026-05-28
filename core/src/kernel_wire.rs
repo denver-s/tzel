@@ -1448,6 +1448,8 @@ mod tests {
         assert_eq!(wire_to_felt(cm_2).unwrap(), req.cm_2);
         let (rest, cm_3) = decode_tze_prefix::<WireFelt>(rest).unwrap();
         assert_eq!(wire_to_felt(cm_3).unwrap(), req.cm_3);
+        let (rest, cm_4) = decode_tze_prefix::<WireFelt>(rest).unwrap();
+        assert_eq!(wire_to_felt(cm_4).unwrap(), req.cm_4);
         let (rest, proof) = decode_tze_prefix::<WireEncodedProof>(rest).unwrap();
         let decoded_proof = encoded_proof_from_wire(proof).unwrap();
         assert_eq!(decoded_proof.proof_bytes, req.proof.proof_bytes);
@@ -1460,6 +1462,9 @@ mod tests {
         let (rest, enc_3) = decode_tze_prefix::<WireEncodedNote>(rest).unwrap();
         let decoded_enc_3 = encoded_note_from_wire(enc_3).unwrap();
         assert_eq!(decoded_enc_3.ct_d, req.enc_3.ct_d);
+        let (rest, enc_4) = decode_tze_prefix::<WireEncodedNote>(rest).unwrap();
+        let decoded_enc_4 = encoded_note_from_wire(enc_4).unwrap();
+        assert_eq!(decoded_enc_4.ct_d, req.enc_4.ct_d);
         assert!(rest.is_empty());
     }
 
