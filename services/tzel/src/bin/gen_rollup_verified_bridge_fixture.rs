@@ -574,6 +574,17 @@ fn generate_transfer_proof(
         return Err("transfer input commitment mismatch".into());
     }
 
+    // Sanity: total_fields self-describes the Cairo args length. The first
+    // emitted felt is total_fields itself, so args.len() should be
+    // total_fields + 1.
+    assert_eq!(
+        args.len(),
+        total_fields + 1,
+        "gen binary transfer arg count mismatch: emitted {} but declared total_fields = {}",
+        args.len(),
+        total_fields,
+    );
+
     let proof = proof_from_bundle(generate_stark_bundle(
         "run_transfer.executable.json",
         &args,

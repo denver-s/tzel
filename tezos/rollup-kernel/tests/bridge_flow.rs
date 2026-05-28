@@ -356,7 +356,6 @@ fn bridge_deposit_rejects_non_canonical_pubkey_hash_receiver() {
 // refactor needed to emit a real cm_4 / cm_change_2.
 #[cfg(feature = "proof-verifier")]
 #[test]
-#[ignore = "phase-c: bridge fixture needs regeneration"]
 fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
     let fixture = verified_bridge_fixture();
     let mut host = TestHost::default();
@@ -409,7 +408,10 @@ fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
 
     match read_last_result(&host).unwrap() {
         KernelResult::Transfer(resp) => {
-            assert_eq!((resp.index_1, resp.index_2, resp.index_3), (2, 3, 4))
+            assert_eq!(
+                (resp.index_1, resp.index_2, resp.index_3, resp.index_4),
+                (2, 3, 4, 5)
+            )
         }
         other => panic!("unexpected rollup result: {:?}", other),
     }
@@ -422,6 +424,7 @@ fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
             fixture.transfer.cm_1,
             fixture.transfer.cm_2,
             fixture.transfer.cm_3,
+            fixture.transfer.cm_4,
         ]
     );
     assert_eq!(ledger.nullifiers.len(), 1);
@@ -433,7 +436,10 @@ fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
     match read_last_result(&restarted).unwrap() {
         KernelResult::Unshield(resp) => {
             assert_eq!(resp.change_index, None);
-            assert_eq!(resp.producer_index, 5);
+            assert_eq!(resp.change_index_2, None);
+            // Phase C: tree now has 6 leaves (2 shield + 4 transfer) before
+            // the unshield's producer-fee note is appended.
+            assert_eq!(resp.producer_index, 6);
         }
         other => panic!("unexpected rollup result: {:?}", other),
     }
@@ -464,7 +470,6 @@ fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
 
 #[cfg(feature = "proof-verifier")]
 #[test]
-#[ignore = "phase-c: bridge fixture needs regeneration"]
 fn verified_unshield_survives_restart_and_persists_withdrawal_record() {
     let fixture = verified_bridge_fixture();
     let mut host = TestHost::default();
@@ -601,7 +606,6 @@ fn verified_shield_rejects_tampered_client_note_without_mutating_pool() {
 
 #[cfg(feature = "proof-verifier")]
 #[test]
-#[ignore = "phase-c: bridge fixture needs regeneration"]
 fn verified_transfer_rejects_tampered_output_note_without_mutating_state() {
     let fixture = verified_bridge_fixture();
     let mut host = TestHost::default();
@@ -634,7 +638,6 @@ fn verified_transfer_rejects_tampered_output_note_without_mutating_state() {
 
 #[cfg(feature = "proof-verifier")]
 #[test]
-#[ignore = "phase-c: bridge fixture needs regeneration"]
 fn verified_transfer_consumes_one_note_and_creates_change_and_recipient_notes() {
     let fixture = verified_bridge_fixture();
     let mut host = TestHost::default();
@@ -647,7 +650,10 @@ fn verified_transfer_consumes_one_note_and_creates_change_and_recipient_notes() 
 
     match read_last_result(&host).unwrap() {
         KernelResult::Transfer(resp) => {
-            assert_eq!((resp.index_1, resp.index_2, resp.index_3), (2, 3, 4))
+            assert_eq!(
+                (resp.index_1, resp.index_2, resp.index_3, resp.index_4),
+                (2, 3, 4, 5)
+            )
         }
         other => panic!("unexpected rollup result: {:?}", other),
     }
@@ -656,7 +662,7 @@ fn verified_transfer_consumes_one_note_and_creates_change_and_recipient_notes() 
     assert_eq!(after_transfer.withdrawals, before_transfer.withdrawals);
     assert_eq!(
         after_transfer.tree.leaves.len(),
-        before_transfer.tree.leaves.len() + 3
+        before_transfer.tree.leaves.len() + 4
     );
     assert_eq!(
         after_transfer.nullifiers.len(),
@@ -670,6 +676,7 @@ fn verified_transfer_consumes_one_note_and_creates_change_and_recipient_notes() 
             fixture.transfer.cm_1,
             fixture.transfer.cm_2,
             fixture.transfer.cm_3,
+            fixture.transfer.cm_4,
         ]
     );
     assert!(after_transfer
@@ -680,7 +687,6 @@ fn verified_transfer_consumes_one_note_and_creates_change_and_recipient_notes() 
 
 #[cfg(feature = "proof-verifier")]
 #[test]
-#[ignore = "phase-c: bridge fixture needs regeneration"]
 fn verified_unshield_rejects_tampered_recipient_without_mutating_state() {
     let fixture = verified_bridge_fixture();
     let mut host = TestHost::default();
@@ -941,11 +947,11 @@ fn kernel_transfer_req_from_fixture(req: &TransferReq) -> KernelTransferReq {
         cm_1: req.cm_1,
         cm_2: req.cm_2,
         cm_3: req.cm_3,
+        cm_4: req.cm_4,
         enc_1: req.enc_1.clone(),
         enc_2: req.enc_2.clone(),
         enc_3: req.enc_3.clone(),
-        cm_4: ZERO, // Phase C placeholder
-        enc_4: req.enc_3.clone(),
+        enc_4: req.enc_4.clone(),
         proof: kernel_proof_from_fixture(&req.proof),
     }
 }
@@ -960,8 +966,8 @@ fn kernel_unshield_req_from_fixture(req: &UnshieldReq) -> KernelUnshieldReq {
         recipient: req.recipient.clone(),
         cm_change: req.cm_change,
         enc_change: req.enc_change.clone(),
-        cm_change_2: ZERO,
-        enc_change_2: None,
+        cm_change_2: req.cm_change_2,
+        enc_change_2: req.enc_change_2.clone(),
         cm_fee: req.cm_fee,
         enc_fee: req.enc_fee.clone(),
         proof: kernel_proof_from_fixture(&req.proof),
