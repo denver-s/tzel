@@ -231,16 +231,21 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
         .collect();
     let total_in: u64 = values.iter().sum();
 
+    // Phase C: 4 output slots — recipient (cm_1), change_1 (cm_2),
+    // change_2 placeholder (cm_3, zero-value), producer fee (cm_4).
     let (d_j_1, auth_root_1, auth_pub_seed_1, nk_tag_1, mh_1, rseed_1) =
         synthetic_output_fields(0xD000);
     let (d_j_2, auth_root_2, auth_pub_seed_2, nk_tag_2, mh_2, rseed_2) =
         synthetic_output_fields(0xE000);
     let (d_j_3, auth_root_3, auth_pub_seed_3, nk_tag_3, mh_3, rseed_3) =
         synthetic_output_fields(0xF000);
+    let (d_j_4, auth_root_4, auth_pub_seed_4, nk_tag_4, mh_4, rseed_4) =
+        synthetic_output_fields(0xC000);
     let producer_fee = 1u64;
     let spendable = total_in - MIN_TX_FEE - producer_fee;
     let v_1 = spendable / 2;
     let v_2 = spendable - v_1;
+    let v_3: u64 = 0;
     let cm_1 = commit(
         &d_j_1,
         v_1,
@@ -255,10 +260,16 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
         &owner_tag(&auth_root_2, &auth_pub_seed_2, &nk_tag_2));
     let cm_3 = commit(
         &d_j_3,
-        producer_fee,
+        v_3,
         &ASSET_TEZ,
         &derive_rcm(&rseed_3),
         &owner_tag(&auth_root_3, &auth_pub_seed_3, &nk_tag_3));
+    let cm_4 = commit(
+        &d_j_4,
+        producer_fee,
+        &ASSET_TEZ,
+        &derive_rcm(&rseed_4),
+        &owner_tag(&auth_root_4, &auth_pub_seed_4, &nk_tag_4));
 
     let auth_domain = u64_to_felt(0xF001);
     let fee = MIN_TX_FEE;
@@ -270,11 +281,11 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
         &cm_1,
         &cm_2,
         &cm_3,
-        &cm_3,
+        &cm_4,
         &mh_1,
         &mh_2,
         &mh_3,
-        &mh_3
+        &mh_4,
     );
 
     let mut cm_paths = Vec::with_capacity(n_inputs);
@@ -287,8 +298,16 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
         wots_sigs.push(sig);
     }
 
-    let total_fields =
-        4 + 9 * n_inputs + n_inputs * DEPTH + n_inputs * AUTH_DEPTH + n_inputs * WOTS_CHAINS + 24;
+    // Phase C: 4 output blocks of 9 fields each + n input asset tags + 1
+    // primary_non_tez_asset.
+    let total_fields = 4
+        + 9 * n_inputs
+        + n_inputs * DEPTH
+        + n_inputs * AUTH_DEPTH
+        + n_inputs * WOTS_CHAINS
+        + n_inputs
+        + 9 * 4
+        + 1;
     let mut args = Vec::with_capacity(total_fields + 1);
     args.push(felt_u64_to_hex(total_fields as u64));
     args.push(felt_u64_to_hex(n_inputs as u64));
@@ -335,7 +354,7 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_1));
     args.push(felt_to_hex(&nk_tag_1));
     args.push(felt_to_hex(&mh_1));
-    args.push(felt_to_hex(&ASSET_TEZ)); // asset_1
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_1 (recipient)
 
     args.push(felt_to_hex(&cm_2));
     args.push(felt_to_hex(&d_j_2));
@@ -345,17 +364,27 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&auth_pub_seed_2));
     args.push(felt_to_hex(&nk_tag_2));
     args.push(felt_to_hex(&mh_2));
-    args.push(felt_to_hex(&ASSET_TEZ)); // asset_2
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_2 (change_1)
 
     args.push(felt_to_hex(&cm_3));
     args.push(felt_to_hex(&d_j_3));
-    args.push(felt_u64_to_hex(producer_fee));
+    args.push(felt_u64_to_hex(v_3));
     args.push(felt_to_hex(&rseed_3));
     args.push(felt_to_hex(&auth_root_3));
     args.push(felt_to_hex(&auth_pub_seed_3));
     args.push(felt_to_hex(&nk_tag_3));
     args.push(felt_to_hex(&mh_3));
-    args.push(felt_to_hex(&ASSET_TEZ)); // asset_3 (pinned to tez by circuit)
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_3 (change_2 placeholder)
+
+    args.push(felt_to_hex(&cm_4));
+    args.push(felt_to_hex(&d_j_4));
+    args.push(felt_u64_to_hex(producer_fee));
+    args.push(felt_to_hex(&rseed_4));
+    args.push(felt_to_hex(&auth_root_4));
+    args.push(felt_to_hex(&auth_pub_seed_4));
+    args.push(felt_to_hex(&nk_tag_4));
+    args.push(felt_to_hex(&mh_4));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_4 (producer, pinned tez)
 
     // primary_non_tez_asset — any value works for pure-tez txs;
     // we use ASSET_TEZ for the bench.
@@ -364,7 +393,7 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     let mut expected_public_outputs = vec![auth_domain, root];
     expected_public_outputs.extend(nullifiers.iter().copied());
     expected_public_outputs.push(u64_to_felt(fee));
-    expected_public_outputs.extend([cm_1, cm_2, cm_3, mh_1, mh_2, mh_3]);
+    expected_public_outputs.extend([cm_1, cm_2, cm_3, cm_4, mh_1, mh_2, mh_3, mh_4]);
 
     BenchWitness {
         args,
@@ -462,16 +491,23 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         wots_sigs.push(sig);
     }
 
-    // Phase B: + n_inputs input_assets + asset_change + asset_fee
-    // + asset_pub + primary_non_tez_asset = n_inputs + 4 extra felts.
+    // Phase B+C wire layout:
+    //   prefix(6): N, auth_domain, root, v_pub, fee, recipient
+    //   inputs: 9N + N*DEPTH + N*AUTH_DEPTH + N*WOTS_CHAINS + N (asset tags)
+    //   change_1 slot: 9 fields (has_change + 7 fields + asset)
+    //   change_2 slot: 9 fields (has_change_2 + 7 fields + asset)
+    //   fee slot: 8 fields (7 + asset, no has_change)
+    //   trailer: asset_pub + primary_non_tez_asset = 2
     let total_fields = 6
         + 9 * n_inputs
         + n_inputs * DEPTH
         + n_inputs * AUTH_DEPTH
         + n_inputs * WOTS_CHAINS
-        + 15
         + n_inputs
-        + 4;
+        + 9
+        + 9
+        + 8
+        + 2;
     let mut args = Vec::with_capacity(total_fields + 1);
     args.push(felt_u64_to_hex(total_fields as u64));
     args.push(felt_u64_to_hex(n_inputs as u64));
@@ -512,6 +548,7 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         args.push(felt_to_hex(&ASSET_TEZ));
     }
 
+    // Change_1 slot — present (carries the actual change in this bench).
     args.push(felt_u64_to_hex(1));
     args.push(felt_to_hex(&d_j_change));
     args.push(felt_u64_to_hex(v_change));
@@ -521,6 +558,19 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     args.push(felt_to_hex(&nk_tag_change));
     args.push(felt_to_hex(&mh_change));
     args.push(felt_to_hex(&ASSET_TEZ)); // asset_change
+
+    // Phase C: change_2 slot — empty placeholder (has_change_2 = 0
+    // so change_commitment_or_zero returns ZERO and the matching
+    // sighash bound used ZERO/ZERO).
+    args.push(felt_u64_to_hex(0));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_u64_to_hex(0));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_to_hex(&ZERO));
+    args.push(felt_to_hex(&ASSET_TEZ)); // asset_change_2 (placeholder == tez)
 
     args.push(felt_to_hex(&d_j_fee));
     args.push(felt_u64_to_hex(producer_fee));
@@ -543,6 +593,8 @@ pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
         recipient,
         cm_change,
         mh_change,
+        ZERO, // cm_change_2 (placeholder slot has has_change_2 = 0)
+        ZERO, // mh_change_2
         cm_fee,
         mh_fee,
     ]);
