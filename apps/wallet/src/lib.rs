@@ -8752,7 +8752,8 @@ fn cmd_shield_rollup(
     let (sig, _pk, _digits) = wots_sign(&ask_j, key_idx, &sighash);
 
     let proof = {
-        let total_fields: usize = 16 + WOTS_CHAINS + AUTH_DEPTH + 5;
+        // Phase B: +2 fields for asset_new + asset_producer.
+        let total_fields: usize = 16 + WOTS_CHAINS + AUTH_DEPTH + 5 + 2;
         let mut args: Vec<String> = Vec::with_capacity(1 + total_fields);
         args.push(felt_u64_to_hex(total_fields as u64));
 
@@ -8789,6 +8790,10 @@ fn cmd_shield_rollup(
         args.push(felt_to_hex(&producer_address.nk_tag));
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_to_hex(&note_producer.rseed));
+
+        // Phase B: asset_new + asset_producer (both ASSET_TEZ in v1).
+        args.push(felt_to_hex(&ASSET_TEZ));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
         phase_event!("witness_built", { "args_count": args.len() as u64, "args_bytes": args_bytes });
