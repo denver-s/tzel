@@ -8475,7 +8475,12 @@ fn cmd_unshield(
             wots_key_indices.push(key_idx);
         }
 
-        let total = 6 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + 15;
+        // Phase B+C unshield layout:
+        //   N input asset tags + change_1 block (8+1) + change_2 block
+        //   (8+1) + fee block (7+1) + asset_pub + primary_non_tez_asset
+        //   = N + 9 + 9 + 8 + 1 + 1 = N + 28 (was 15 pre-Phase-B).
+        let total =
+            6 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + n + 28;
         args.push(felt_u64_to_hex(total as u64));
         args.push(felt_u64_to_hex(n as u64));
         args.push(felt_to_hex(&auth_domain));
@@ -8514,6 +8519,12 @@ fn cmd_unshield(
             }
         }
 
+        // Phase B: per-input asset tags.
+        for _ in 0..n {
+            args.push(felt_to_hex(&ASSET_TEZ));
+        }
+
+        // Change_1 block + asset_change.
         args.push(felt_u64_to_hex(has_change_val));
         if let Some(cd) = &change_data {
             args.push(felt_to_hex(&cd.d_j));
@@ -8528,6 +8539,13 @@ fn cmd_unshield(
                 args.push("0x0".to_string());
             }
         }
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // Change_2 block (all zero — no second change in v1 wallet) +
+        // asset_change_2 (zero satisfies the in-set check since ASSET_TEZ = 0).
+        for _ in 0..9 {
+            args.push("0x0".to_string());
+        }
 
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(dal_fee));
@@ -8536,6 +8554,10 @@ fn cmd_unshield(
         args.push(felt_to_hex(&producer_address.auth_pub_seed));
         args.push(felt_to_hex(&producer_address.nk_tag));
         args.push(felt_to_hex(&producer_note.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        args.push(felt_to_hex(&ASSET_TEZ));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
         // Persist consumed WOTS+ leaf reservations before handing witness material
         // to the prover. If proving fails, the keys stay burned instead of being
@@ -9244,7 +9266,10 @@ fn cmd_unshield_rollup(
             wots_key_indices.push(key_idx);
         }
 
-        let total = 6 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + 15;
+        // Phase B+C: N input asset + change_1 block (9) + change_2 block
+        // (9) + fee block (8) + asset_pub + primary_non_tez_asset = N+28.
+        let total =
+            6 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + n + 28;
         args.push(felt_u64_to_hex(total as u64));
         args.push(felt_u64_to_hex(n as u64));
         args.push(felt_to_hex(&auth_domain));
@@ -9282,6 +9307,11 @@ fn cmd_unshield_rollup(
             }
         }
 
+        // Phase B: per-input asset tags.
+        for _ in 0..n {
+            args.push(felt_to_hex(&ASSET_TEZ));
+        }
+
         args.push(felt_u64_to_hex(has_change_val));
         if let Some(cd) = &change_data {
             args.push(felt_to_hex(&cd.d_j));
@@ -9296,6 +9326,12 @@ fn cmd_unshield_rollup(
                 args.push("0x0".to_string());
             }
         }
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // Phase C: change_2 block (always zero in v1) + asset_change_2.
+        for _ in 0..9 {
+            args.push("0x0".to_string());
+        }
 
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(profile.dal_fee));
@@ -9304,6 +9340,10 @@ fn cmd_unshield_rollup(
         args.push(felt_to_hex(&producer_address.auth_pub_seed));
         args.push(felt_to_hex(&producer_address.nk_tag));
         args.push(felt_to_hex(&producer_note.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        args.push(felt_to_hex(&ASSET_TEZ));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
         phase_event!("witness_built", { "args_count": args.len() as u64, "args_bytes": args_bytes });
