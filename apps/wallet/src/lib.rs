@@ -7063,9 +7063,27 @@ mod tests {
             req.cm_2
         );
 
-        assert!(detect(&req.enc_3, &dk_d0));
+        // Phase C: req.cm_3 / req.enc_3 are now the zero-value change_2
+        // placeholder (owned by the change address); the producer fee
+        // moved to cm_4 / enc_4.
+        assert!(detect(&req.enc_3, &dk_d1));
+        let (change_2_value, change_2_rseed, _change_2_memo) =
+            decrypt_memo(&req.enc_3, &dk_v1).expect("change_2 note should decrypt");
+        assert_eq!(change_2_value, 0);
+        assert_eq!(
+            commit(
+                &change_addr.d_j,
+                change_2_value,
+                &ASSET_TEZ,
+                &derive_rcm(&change_2_rseed),
+                &change_otag
+            ),
+            req.cm_3
+        );
+
+        assert!(detect(&req.enc_4, &dk_d0));
         let (producer_value, producer_rseed, producer_memo) =
-            decrypt_memo(&req.enc_3, &dk_v0).expect("producer note should decrypt");
+            decrypt_memo(&req.enc_4, &dk_v0).expect("producer note should decrypt");
         assert_eq!(producer_value, 1);
         assert_eq!(&producer_memo[..3], b"dal");
         let producer_otag = owner_tag(
@@ -7081,7 +7099,7 @@ mod tests {
                 &derive_rcm(&producer_rseed),
                 &producer_otag
             ),
-            req.cm_3
+            req.cm_4
         );
 
         finalize_successful_spend(wallet_path_str, &mut loaded, &prepared.selected)
@@ -8057,7 +8075,17 @@ fn cmd_transfer(
         &outgoing_seed,
         OutgoingNoteRole::TransferChange,
     )?;
+    // Phase C: cm_3 = zero-value tez change_2 placeholder (wallet keeps
+    // the slot for future non-tez transfers that need tez change paid
+    // alongside a primary asset change).
     let note_3 = build_output_note_with_outgoing(
+        &change_address,
+        0,
+        None,
+        &outgoing_seed,
+        OutgoingNoteRole::TransferChange,
+    )?;
+    let note_4 = build_output_note_with_outgoing(
         &producer_address,
         dal_fee,
         Some(b"dal"),
@@ -8069,12 +8097,8 @@ fn cmd_transfer(
         let auth_domain = cfg.auth_domain;
 
         // Build witness for run_transfer with WOTS+ w=4 inside the STARK.
-        // Layout:
-        // [N, auth_domain, root, per-input(nf,nk_spend,auth_root,auth_idx,d_j,v,rseed,cm_path_idx)×N,
-        //  cm_siblings(N×DEPTH), auth_siblings(N×AUTH_DEPTH),
-        //  wots_sig(N×133), wots_pk(N×133),
-        //  (digits computed by circuit from sighash — not in args)
-        //  output1(7), output2(7)]
+        // Phase B/C layout adds per-input asset tags and a 4th output
+        // block (change_2 placeholder) + primary_non_tez_asset.
         let n = selected.len();
         let mut args: Vec<String> = vec![];
         let mut cm_paths: Vec<Vec<F>> = vec![];
@@ -8097,11 +8121,11 @@ fn cmd_transfer(
             &note_1.cm,
             &note_2.cm,
             &note_3.cm,
-            &note_3.cm,
+            &note_4.cm,
             &note_1.mh,
             &note_2.mh,
             &note_3.mh,
-            &note_3.mh
+            &note_4.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -8137,14 +8161,26 @@ fn cmd_transfer(
             wots_key_indices.push(key_idx);
         }
 
-        let total_fields = 4 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + 24;
+        // Phase C: per-input asset + 4 outputs × (8 fields + asset)
+        // + primary_non_tez_asset. For pure-tez transfers (the v1 use
+        // case) all asset tags are ASSET_TEZ and primary_non_tez_asset
+        // is irrelevant (the constraint is vacuously satisfied).
+        let total_fields = 4
+            + 9 * n
+            + n * DEPTH
+            + n * AUTH_DEPTH
+            + n * WOTS_CHAINS
+            + n          // per-input asset tags
+            + 9 * 4      // 4 output blocks (cm + d_j + v + rseed + auth_root +
+                          //  auth_pub_seed + nk_tag + mh + asset)
+            + 1;         // primary_non_tez_asset
         args.push(felt_u64_to_hex(total_fields as u64));
         args.push(felt_u64_to_hex(n as u64));
         args.push(felt_to_hex(&auth_domain));
         args.push(felt_to_hex(&root));
         args.push(felt_u64_to_hex(fee));
 
-        // Per-input scalar fields (8 per input)
+        // Per-input scalar fields (9 per input)
         for (idx, &si) in selected.iter().enumerate() {
             let note = &w.notes[si];
             let nf = nullifier(&note.nk_spend, &note.cm, note.index as u64);
@@ -8175,7 +8211,12 @@ fn cmd_transfer(
             }
         }
 
-        // Output 1
+        // Phase B: per-input asset tags (pure-tez transfer).
+        for _ in 0..n {
+            args.push(felt_to_hex(&ASSET_TEZ));
+        }
+
+        // Output 1: recipient
         args.push(felt_to_hex(&note_1.cm));
         args.push(felt_to_hex(&recipient.d_j));
         args.push(felt_u64_to_hex(amount));
@@ -8184,8 +8225,9 @@ fn cmd_transfer(
         args.push(felt_to_hex(&recipient.auth_pub_seed));
         args.push(felt_to_hex(&recipient.nk_tag));
         args.push(felt_to_hex(&note_1.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
-        // Output 2
+        // Output 2: change_1
         args.push(felt_to_hex(&note_2.cm));
         args.push(felt_to_hex(&change_state.d_j));
         args.push(felt_u64_to_hex(change));
@@ -8194,16 +8236,32 @@ fn cmd_transfer(
         args.push(felt_to_hex(&change_state.auth_pub_seed));
         args.push(felt_to_hex(&change_state.nk_tag));
         args.push(felt_to_hex(&note_2.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
-        // Output 3
+        // Output 3: change_2 (zero-value tez placeholder).
         args.push(felt_to_hex(&note_3.cm));
+        args.push(felt_to_hex(&change_state.d_j));
+        args.push(felt_u64_to_hex(0));
+        args.push(felt_to_hex(&note_3.rseed));
+        args.push(felt_to_hex(&change_state.auth_root));
+        args.push(felt_to_hex(&change_state.auth_pub_seed));
+        args.push(felt_to_hex(&change_state.nk_tag));
+        args.push(felt_to_hex(&note_3.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // Output 4: producer fee
+        args.push(felt_to_hex(&note_4.cm));
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(dal_fee));
-        args.push(felt_to_hex(&note_3.rseed));
+        args.push(felt_to_hex(&note_4.rseed));
         args.push(felt_to_hex(&producer_address.auth_root));
         args.push(felt_to_hex(&producer_address.auth_pub_seed));
         args.push(felt_to_hex(&producer_address.nk_tag));
-        args.push(felt_to_hex(&note_3.mh));
+        args.push(felt_to_hex(&note_4.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // primary_non_tez_asset (unused in pure-tez transfers)
+        args.push(felt_to_hex(&ASSET_TEZ));
 
         // Persist consumed WOTS+ leaf reservations before handing witness material
         // to the prover. If proving fails, the keys stay burned instead of being
@@ -8224,11 +8282,11 @@ fn cmd_transfer(
         cm_1: note_1.cm,
         cm_2: note_2.cm,
         cm_3: note_3.cm,
+        cm_4: note_4.cm,
         enc_1: note_1.enc,
         enc_2: note_2.enc,
-        enc_3: note_3.enc.clone(),
-        cm_4: ZERO, // Phase C placeholder
-        enc_4: note_3.enc.clone(),
+        enc_3: note_3.enc,
+        enc_4: note_4.enc,
         proof,
     };
     let resp: TransferResp = post_json(&format!("{}/transfer", ledger), &req)?;
@@ -8236,8 +8294,15 @@ fn cmd_transfer(
     finalize_successful_spend(path, &mut w, &selected)?;
 
     println!(
-        "Transferred {} to recipient, fee={}, dal fee={}, change={} (idx={},{},{})",
-        amount, fee, dal_fee, change, resp.index_1, resp.index_2, resp.index_3
+        "Transferred {} to recipient, fee={}, dal fee={}, change={} (idx={},{},{},{})",
+        amount,
+        fee,
+        dal_fee,
+        change,
+        resp.index_1,
+        resp.index_2,
+        resp.index_3,
+        resp.index_4,
     );
     println!("Run 'scan' to pick up change note.");
     Ok(())
@@ -8818,7 +8883,15 @@ fn cmd_transfer_rollup(
         &outgoing_seed,
         OutgoingNoteRole::TransferChange,
     )?;
+    // Phase C: cm_3 = zero-value tez change_2 placeholder.
     let note_3 = build_output_note_with_outgoing(
+        &change_address,
+        0,
+        None,
+        &outgoing_seed,
+        OutgoingNoteRole::TransferChange,
+    )?;
+    let note_4 = build_output_note_with_outgoing(
         producer_address,
         profile.dal_fee,
         Some(b"dal"),
@@ -8843,11 +8916,11 @@ fn cmd_transfer_rollup(
             &note_1.cm,
             &note_2.cm,
             &note_3.cm,
-            &note_3.cm,
+            &note_4.cm,
             &note_1.mh,
             &note_2.mh,
             &note_3.mh,
-            &note_3.mh
+            &note_4.mh
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -8881,7 +8954,14 @@ fn cmd_transfer_rollup(
             wots_key_indices.push(key_idx);
         }
 
-        let total_fields = 4 + 9 * n + n * DEPTH + n * AUTH_DEPTH + n * WOTS_CHAINS + 24;
+        let total_fields = 4
+            + 9 * n
+            + n * DEPTH
+            + n * AUTH_DEPTH
+            + n * WOTS_CHAINS
+            + n
+            + 9 * 4
+            + 1;
         args.push(felt_u64_to_hex(total_fields as u64));
         args.push(felt_u64_to_hex(n as u64));
         args.push(felt_to_hex(&auth_domain));
@@ -8917,6 +8997,12 @@ fn cmd_transfer_rollup(
             }
         }
 
+        // Phase B: per-input asset tags.
+        for _ in 0..n {
+            args.push(felt_to_hex(&ASSET_TEZ));
+        }
+
+        // Output 1: recipient
         args.push(felt_to_hex(&note_1.cm));
         args.push(felt_to_hex(&recipient.d_j));
         args.push(felt_u64_to_hex(amount));
@@ -8925,7 +9011,9 @@ fn cmd_transfer_rollup(
         args.push(felt_to_hex(&recipient.auth_pub_seed));
         args.push(felt_to_hex(&recipient.nk_tag));
         args.push(felt_to_hex(&note_1.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
+        // Output 2: change_1
         args.push(felt_to_hex(&note_2.cm));
         args.push(felt_to_hex(&change_state.d_j));
         args.push(felt_u64_to_hex(change));
@@ -8934,15 +9022,32 @@ fn cmd_transfer_rollup(
         args.push(felt_to_hex(&change_state.auth_pub_seed));
         args.push(felt_to_hex(&change_state.nk_tag));
         args.push(felt_to_hex(&note_2.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
 
+        // Output 3: change_2 (zero-value placeholder)
         args.push(felt_to_hex(&note_3.cm));
+        args.push(felt_to_hex(&change_state.d_j));
+        args.push(felt_u64_to_hex(0));
+        args.push(felt_to_hex(&note_3.rseed));
+        args.push(felt_to_hex(&change_state.auth_root));
+        args.push(felt_to_hex(&change_state.auth_pub_seed));
+        args.push(felt_to_hex(&change_state.nk_tag));
+        args.push(felt_to_hex(&note_3.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // Output 4: producer fee
+        args.push(felt_to_hex(&note_4.cm));
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(profile.dal_fee));
-        args.push(felt_to_hex(&note_3.rseed));
+        args.push(felt_to_hex(&note_4.rseed));
         args.push(felt_to_hex(&producer_address.auth_root));
         args.push(felt_to_hex(&producer_address.auth_pub_seed));
         args.push(felt_to_hex(&producer_address.nk_tag));
-        args.push(felt_to_hex(&note_3.mh));
+        args.push(felt_to_hex(&note_4.mh));
+        args.push(felt_to_hex(&ASSET_TEZ));
+
+        // primary_non_tez_asset (unused in pure-tez transfers)
+        args.push(felt_to_hex(&ASSET_TEZ));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
         phase_event!("witness_built", { "args_count": args.len() as u64, "args_bytes": args_bytes });
@@ -8957,11 +9062,11 @@ fn cmd_transfer_rollup(
         cm_1: note_1.cm,
         cm_2: note_2.cm,
         cm_3: note_3.cm,
+        cm_4: note_4.cm,
         enc_1: note_1.enc,
         enc_2: note_2.enc,
-        enc_3: note_3.enc.clone(),
-        cm_4: ZERO, // Phase C placeholder
-        enc_4: note_3.enc.clone(),
+        enc_3: note_3.enc,
+        enc_4: note_4.enc,
         proof,
     };
     let kernel_req = transfer_req_to_kernel(&req)?;
@@ -9340,7 +9445,15 @@ fn prepare_transfer_skip_proof(
         &outgoing_seed,
         OutgoingNoteRole::TransferChange,
     )?;
+    // Phase C: cm_3 = zero-value tez change_2 placeholder.
     let note_3 = build_output_note_with_outgoing(
+        &change_address,
+        0,
+        None,
+        &outgoing_seed,
+        OutgoingNoteRole::TransferChange,
+    )?;
+    let note_4 = build_output_note_with_outgoing(
         producer_address,
         dal_fee,
         Some(b"dal"),
@@ -9358,11 +9471,11 @@ fn prepare_transfer_skip_proof(
             cm_1: note_1.cm,
             cm_2: note_2.cm,
             cm_3: note_3.cm,
+            cm_4: note_4.cm,
             enc_1: note_1.enc,
             enc_2: note_2.enc,
-            enc_3: note_3.enc.clone(),
-            cm_4: ZERO, // Phase C placeholder
-            enc_4: note_3.enc.clone(),
+            enc_3: note_3.enc,
+            enc_4: note_4.enc,
             proof: Proof::TrustMeBro,
         },
     })
