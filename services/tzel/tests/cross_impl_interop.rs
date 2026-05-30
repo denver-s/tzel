@@ -73,6 +73,7 @@ fn shield_req(step: &InteropShieldStep, auth_domain: &F) -> (F, ShieldReq) {
                 step.producer_cm,
                 step.memo_ct_hash,
                 step.producer_memo_ct_hash,
+                ASSET_TEZ,
             ],
         },
         client_cm: step.cm,

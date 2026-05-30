@@ -762,10 +762,16 @@ fn validate_bridge_deposit<H: Host>(
     ledger: &DurableLedgerState<'_, H>,
     deposit: &ParsedBridgeDeposit,
 ) -> Result<(), String> {
-    let configured = ledger
+    // E.3: any registered ticketer (tez or compile-time FA2) is a
+    // valid deposit sender. The downstream `asset_for_ticketer`
+    // lookup decides which asset's pool to credit. Rejecting here
+    // gives a stronger error message than waiting for the pool
+    // routing to fail in the calling site.
+    let tez_ticketer = ledger
         .read_string(PATH_BRIDGE_TICKETER, MAX_INPUT_BYTES)?
         .ok_or_else(|| "bridge ticketer is not configured".to_string())?;
-    if configured != deposit.ticketer {
+    let registry = tzel_core::compose_asset_registry(&tez_ticketer);
+    if tzel_core::asset_for_ticketer(&registry, &deposit.ticketer).is_none() {
         return Err("deposit sent from unexpected ticketer".into());
     }
     if !tzel_core::is_deposit_recipient_string(&deposit.recipient) {
@@ -1156,11 +1162,22 @@ fn prepare_unshield_outbox<H: Host>(
     ledger: &mut DurableLedgerState<'_, H>,
     req: &tzel_core::PreparedUnshield,
 ) -> Result<Vec<u8>, String> {
-    let ticketer = ledger
+    // Compose the full asset registry from the durable tez ticketer +
+    // the compile-time FA2 bridge list. The unshield's asset_pub must
+    // appear in this registry, and the L1 burn dispatches to the
+    // matching ticketer.
+    let tez_ticketer = ledger
         .read_string(PATH_BRIDGE_TICKETER, MAX_INPUT_BYTES)?
         .ok_or_else(|| "bridge ticketer is not configured".to_string())?;
+    let registry = tzel_core::compose_asset_registry(&tez_ticketer);
+    let ticketer = tzel_core::ticketer_for_asset(&registry, req.asset_id()).ok_or_else(|| {
+        format!(
+            "unshield asset_id {} is not in the registered bridge set",
+            hex::encode(req.asset_id()),
+        )
+    })?;
     encode_withdrawal_outbox_message(
-        &ticketer,
+        ticketer,
         &WithdrawalRecord {
             asset_id: *req.asset_id(),
             recipient: req.recipient().to_string(),
@@ -1381,6 +1398,19 @@ fn prepare_durable_shield_commit<H: Host>(
     ledger: &mut DurableLedgerState<'_, H>,
     prepared: &tzel_core::PreparedShield,
 ) -> Result<PreparedDurableShieldCommit, String> {
+    // 0. Validate the asset_id against the registry. Refuse to debit
+    // a pool for an asset the kernel doesn't recognize.
+    let tez_ticketer = ledger
+        .read_string(PATH_BRIDGE_TICKETER, MAX_INPUT_BYTES)?
+        .ok_or_else(|| "bridge ticketer is not configured".to_string())?;
+    let registry = tzel_core::compose_asset_registry(&tez_ticketer);
+    if tzel_core::ticketer_for_asset(&registry, prepared.asset_id()).is_none() {
+        return Err(format!(
+            "shield asset_id {} is not in the registered bridge set",
+            hex::encode(prepared.asset_id()),
+        ));
+    }
+
     // 1. Validate the pool balance without mutating.
     let balance_path = deposit_balance_path(prepared.asset_id(), prepared.pubkey_hash());
     let balance_bytes = ledger.host.read_store(&balance_path, 8).ok_or_else(|| {
@@ -1614,12 +1644,26 @@ fn apply_input_message<H: Host>(host: &mut H, input: &InputMessage) -> Option<Ke
         ParsedRollupMessage::Ignore => unreachable!("ignored messages are handled above"),
         ParsedRollupMessage::Deposit(req) => (|| -> Result<KernelResult, String> {
             validate_bridge_deposit(&ledger, &req)?;
-            // E.2: deposits are credited per-(asset, pubkey). In E.3
-            // the kernel will derive asset_id from the ticketer
-            // address (one-ticketer-per-asset) and reject deposits
-            // from any ticketer not in the registry. Until then,
-            // every deposit goes to the tez pool.
-            apply_deposit(&mut ledger, &tzel_core::ASSET_TEZ, &req.recipient, req.amount)
+            // E.3: deposits are routed by ticketer address. The tez
+            // ticketer comes from BridgeConfig; FA2 ticketers from
+            // the compile-time registry. Deposits whose sender is
+            // not in the registry have already been rejected by
+            // validate_bridge_deposit (the durable tez check), but
+            // FA2 ticketers must be matched here against the
+            // compile-time list before we credit the per-asset pool.
+            let tez_ticketer = ledger
+                .read_string(PATH_BRIDGE_TICKETER, MAX_INPUT_BYTES)?
+                .ok_or_else(|| "bridge ticketer is not configured".to_string())?;
+            let registry = tzel_core::compose_asset_registry(&tez_ticketer);
+            let asset_id = tzel_core::asset_for_ticketer(&registry, &req.ticketer)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "deposit ticketer {} is not in the registered bridge set",
+                        req.ticketer,
+                    )
+                })?;
+            apply_deposit(&mut ledger, &asset_id, &req.recipient, req.amount)
                 .map(|_| KernelResult::Deposit)
         })(),
         ParsedRollupMessage::Kernel(message) => apply_kernel_message(&mut ledger, message),
@@ -2381,6 +2425,7 @@ mod tests {
     #[test]
     fn applies_shield_message_with_shared_ledger_logic() {
         let mut host = MockHost::default();
+        install_test_bridge(&mut host);
         let producer_fee = 1;
         let v = 50u64;
 

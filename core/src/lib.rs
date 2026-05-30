@@ -78,6 +78,65 @@ impl AssetEntry {
         Self { asset_id, ticketer }
     }
 }
+
+/// Compile-time FA2 bridge registry. Changing this list is a kernel
+/// upgrade (same governance surface as any other protocol change).
+/// Each entry must be a distinct L1 ticketer address; asset_ids are
+/// structurally derived from the address by `derive_asset_id` so two
+/// entries cannot collide unless their ticketer strings collide.
+///
+/// The tez bridge is NOT included here — its ticketer address is
+/// instance-specific (deployed per network) and lives in the durable
+/// `BridgeConfig`. Compose the full registry at runtime with
+/// `compose_asset_registry(tez_ticketer)`.
+///
+/// In v2 the list is empty; an FA2 bridge ticketer entry will land
+/// alongside the corresponding Michelson contract in E.5.
+pub const COMPILE_TIME_FA2_BRIDGES: &[&str] = &[];
+
+/// Build the full asset registry for the running kernel: tez entry
+/// first (using the durable BridgeConfig's ticketer), followed by the
+/// compile-time FA2 bridges. Used by apply_shield / apply_unshield
+/// for membership checks and by the outbox dispatcher (E.4) for
+/// asset → ticketer lookups.
+pub fn compose_asset_registry(tez_ticketer: &str) -> Vec<AssetEntry> {
+    let mut entries = Vec::with_capacity(1 + COMPILE_TIME_FA2_BRIDGES.len());
+    entries.push(AssetEntry::tez(tez_ticketer.to_string()));
+    for fa2 in COMPILE_TIME_FA2_BRIDGES {
+        entries.push(AssetEntry::fa2((*fa2).to_string()));
+    }
+    entries
+}
+
+/// Look up the L1 ticketer address that mints/burns tickets for a
+/// given asset_id. Used by the outbox dispatcher (E.4). Returns None
+/// if the asset is not in the registry — the caller (kernel) MUST
+/// treat this as a hard error (refuse to emit the outbox message,
+/// surface a kernel-result Error).
+pub fn ticketer_for_asset<'a>(
+    registry: &'a [AssetEntry],
+    asset_id: &F,
+) -> Option<&'a str> {
+    registry
+        .iter()
+        .find(|entry| &entry.asset_id == asset_id)
+        .map(|entry| entry.ticketer.as_str())
+}
+
+/// Look up the asset_id served by a given L1 ticketer address. Used
+/// by the deposit dispatcher: when a ticket transfer arrives, the
+/// kernel matches the sender ticketer to a registered asset (or
+/// rejects the deposit). Returns None when the ticketer is not in
+/// the registry.
+pub fn asset_for_ticketer<'a>(
+    registry: &'a [AssetEntry],
+    ticketer: &str,
+) -> Option<&'a F> {
+    registry
+        .iter()
+        .find(|entry| entry.ticketer == ticketer)
+        .map(|entry| &entry.asset_id)
+}
 pub const DETECT_K: usize = 10;
 pub const ML_KEM768_CIPHERTEXT_BYTES: usize = 1088;
 pub const NOTE_AEAD_NONCE_BYTES: usize = 12;
@@ -2409,10 +2468,14 @@ pub fn prepare_shield<S: LedgerState>(
         output_preimage,
     } = &req.proof
     {
-        let public_outputs = transition_public_outputs(output_preimage, 9)?;
-        if public_outputs.len() != 9 {
+        // Phase E.3: shield outputs now include `asset_new` at index
+        // 9 (the recipient note's asset) so the kernel can validate
+        // it against the registered bridge ticketers. Length is now
+        // 10 fields.
+        let public_outputs = transition_public_outputs(output_preimage, 10)?;
+        if public_outputs.len() != 10 {
             return Err(format!(
-                "shield public output length mismatch: {} != 9",
+                "shield public output length mismatch: {} != 10",
                 public_outputs.len()
             ));
         }
@@ -2442,6 +2505,15 @@ pub fn prepare_shield<S: LedgerState>(
         }
         if public_outputs[8] != mh_producer {
             return Err("proof producer memo_ct_hash mismatch".into());
+        }
+        // The proof's asset_new must match the shield request's
+        // asset_id. Without this bind, a malicious wallet could
+        // commit cm_new to one asset while claiming to draw a
+        // different asset's pool — minting an FA2 note "for free"
+        // by draining tez. The kernel's registry membership check
+        // is downstream of this consistency check.
+        if public_outputs[9] != req.asset_id {
+            return Err("proof asset_new does not match req.asset_id".into());
         }
     }
 
@@ -4542,6 +4614,7 @@ mod tests {
                     producer_cm,
                     memo_hash,
                     producer_memo_hash,
+                    ASSET_TEZ,
                 ]),
                 client_cm: cm,
                 client_enc: enc,
@@ -4615,6 +4688,7 @@ mod tests {
                 producer_cm_a,
                 mh_a,
                 producer_mh_a,
+                ASSET_TEZ,
             ]),
             client_cm: cm_a,
             client_enc: enc_a,
@@ -4639,6 +4713,7 @@ mod tests {
                 producer_cm_b,
                 mh_b,
                 producer_mh_b,
+                ASSET_TEZ,
             ]),
             client_cm: cm_b,
             client_enc: enc_b,
@@ -4695,6 +4770,7 @@ mod tests {
                 producer_cm,
                 memo_hash,
                 producer_memo_hash,
+                ASSET_TEZ,
             ]),
             client_cm: cm,
             client_enc: enc,
@@ -4782,6 +4858,7 @@ mod tests {
                     producer_cm,
                     memo_hash,
                     producer_memo_hash,
+                    ASSET_TEZ,
                 ]),
                 client_cm: cm,
                 client_enc: enc,
@@ -4919,6 +4996,7 @@ mod tests {
                     producer_cm,
                     memo_ct_hash(&enc),
                     memo_ct_hash(&producer_enc),
+                    ASSET_TEZ,
                 ]),
                 client_cm: cm,
                 client_enc: enc,
@@ -4979,6 +5057,7 @@ mod tests {
                     producer_cm,
                     memo_ct_hash(&enc),
                     memo_ct_hash(&producer_enc),
+                    ASSET_TEZ,
                 ]),
                 client_cm: cm,
                 client_enc: enc,
@@ -5062,6 +5141,7 @@ mod tests {
                     producer_cm,
                     memo_ct_hash(&enc),
                     memo_ct_hash(&producer_enc),
+                    ASSET_TEZ,
                 ]),
                 client_cm: cm,
                 client_enc: enc,

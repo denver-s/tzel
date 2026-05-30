@@ -45,6 +45,13 @@ pub struct KernelSignedVerifierConfig {
     pub signature: Vec<F>,
 }
 
+/// Bridge config carried in the `ConfigureBridge` inbox message. Only
+/// the tez ticketer is configurable at runtime — additional FA2
+/// bridges live in the kernel binary's compile-time registry
+/// (`tzel_core::compile_time_fa2_bridges`). The asset registry is
+/// therefore deliberately illiquid: changing the set of supported
+/// assets requires a kernel upgrade, the same governance surface as
+/// any other circuit/protocol change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelBridgeConfig {
     pub ticketer: String,

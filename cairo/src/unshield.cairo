@@ -114,8 +114,11 @@ pub fn verify(
     assert(cm_siblings_flat.len() == n * merkle::TREE_DEPTH, 'unshield: cm_sibs len');
     assert(input_asset_list.len() == n, 'unshield: asset list len');
 
-    // v1 single-bridge constraint: the public L1 exit can only be tez.
-    assert(asset_pub == ASSET_TEZ, 'unshield: v1 tez exit only');
+    // Phase E.3: the v1 `asset_pub == ASSET_TEZ` pin moved to the
+    // kernel-side registry check (the kernel rejects exits to
+    // unregistered ticketers / unknown asset_ids). The circuit only
+    // verifies the per-asset balance and the producer-fee pin below.
+    //
     // Permanent: producer fee must be tez.
     assert(asset_fee == ASSET_TEZ, 'unshield: producer must be tez');
 
@@ -1295,10 +1298,17 @@ mod tests {
     // Multiasset Phase B/C mutation tests
     // ═══════════════════════════════════════════════════════════════
 
-    /// asset_pub must equal ASSET_TEZ in v1 (single tez bridge).
+    /// Phase E.3: the Cairo `asset_pub == ASSET_TEZ` pin was lifted —
+    /// the kernel enforces "asset_pub ∈ registered" against the
+    /// kernel-binary registry. Mutating just `asset_pub` after the
+    /// fact still breaks the WOTS sighash: asset_pub is folded into
+    /// the unshield sighash, so a fixture that signed for ASSET_TEZ
+    /// fails the auth-tree recover when asset_pub is swapped for
+    /// 0xDEADBEEF. The kernel-side registry check is exercised by the
+    /// Rust apply_unshield tests.
     #[test]
-    #[should_panic(expected: ('unshield: v1 tez exit only',))]
-    fn test_unshield_rejects_non_tez_exit_asset_in_v1() {
+    #[should_panic(expected: ('xmss auth root mismatch',))]
+    fn test_unshield_rejects_asset_pub_mutation_via_sighash_binding() {
         let mut fixture = build_fixture();
         fixture.asset_pub = 0xDEADBEEF;
         run_verify(@fixture);

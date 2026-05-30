@@ -71,9 +71,11 @@ pub fn verify(
     assert(wots_sig_flat.len() == xmss_common::WOTS_CHAINS, 'shield: wots sig len');
     assert(auth_siblings_flat.len() == merkle::AUTH_DEPTH, 'shield: auth sib len');
 
-    // v1 single-bridge constraint: shield only accepts tez deposits.
-    // Lift to a per-bridge whitelist when other bridges land.
-    assert(asset_new == ASSET_TEZ, 'shield: v1 tez only');
+    // Phase E.3: asset_new is exposed in the public outputs (last
+    // entry) so the kernel can validate it against the registered
+    // bridge ticketers. The circuit no longer pins asset_new ==
+    // ASSET_TEZ; that check lives at the kernel boundary.
+    //
     // Permanent constraint: DAL slot publisher fee must be tez.
     assert(asset_producer == ASSET_TEZ, 'shield: producer must be tez');
 
@@ -146,6 +148,11 @@ pub fn verify(
         cm_producer,
         memo_ct_hash,
         producer_memo_ct_hash,
+        // Phase E.3: expose the recipient note's asset so the kernel
+        // can route the shield to the right (asset_id, pubkey_hash)
+        // deposit pool. asset_producer stays implicit since it's
+        // pinned to ASSET_TEZ above.
+        asset_new,
     ]
 }
 
@@ -453,7 +460,8 @@ mod tests {
     fn test_shield_accepts_valid_statement() {
         let fixture = build_fixture();
         let outputs = run_verify(@fixture);
-        assert(outputs.len() == 9, 'shield outputs len');
+        // Phase E.3: +1 trailing slot for asset_new.
+        assert(outputs.len() == 10, 'shield outputs len');
         assert(*outputs.at(0) == fixture.auth_domain, 'shield out domain');
         assert(*outputs.at(1) == fixture.pubkey_hash, 'shield out pkh');
         assert(*outputs.at(2) == fixture.v_note.into(), 'shield out v');
@@ -463,6 +471,7 @@ mod tests {
         assert(*outputs.at(6) == fixture.cm_producer, 'shield out cm prod');
         assert(*outputs.at(7) == fixture.memo_ct_hash, 'shield out mh');
         assert(*outputs.at(8) == fixture.producer_memo_ct_hash, 'shield out prod mh');
+        assert(*outputs.at(9) == fixture.asset_new, 'shield out asset new');
     }
 
     #[test]
@@ -657,32 +666,30 @@ mod tests {
     // Multiasset Phase B mutation tests
     // ═══════════════════════════════════════════════════════════════
 
-    /// asset_new must equal ASSET_TEZ in v1 (single tez bridge deployed).
+    /// Phase E.3: the Cairo `asset_new == ASSET_TEZ` pin was lifted —
+    /// the kernel now enforces "asset_new ∈ registered" at apply time
+    /// against the kernel-binary registry. The circuit only checks
+    /// that `cm_new = commit(d_j, v, asset_new, …)` is consistent with
+    /// whatever asset_new the prover claims, and that the WOTS sig
+    /// covers it via the sighash. Mutating just `asset_new` after the
+    /// fact still breaks the commitment recompute (fixture.cm_new was
+    /// built against asset = ASSET_TEZ) — the 'shield: bad commitment'
+    /// assertion fires before sighash recovery.
     #[test]
-    #[should_panic(expected: ('shield: v1 tez only',))]
-    fn test_shield_rejects_non_tez_recipient_asset_in_v1() {
+    #[should_panic(expected: ('shield: bad commitment',))]
+    fn test_shield_rejects_asset_new_mutation_via_commitment_binding() {
         let mut fixture = build_fixture();
         fixture.asset_new = 0xFEEDFACE;
         run_verify(@fixture);
     }
 
-    /// asset_producer must be ASSET_TEZ — permanent constraint.
+    /// asset_producer must be ASSET_TEZ — permanent constraint
+    /// (liquidity argument for DAL inclusion).
     #[test]
     #[should_panic(expected: ('shield: producer must be tez',))]
     fn test_shield_rejects_non_tez_producer_asset() {
         let mut fixture = build_fixture();
         fixture.asset_producer = 0xBADBEEF;
-        run_verify(@fixture);
-    }
-
-    /// asset_new in the witness must match what the sighash binds.
-    /// Mutating asset_new without re-signing breaks the WOTS binding.
-    #[test]
-    #[should_panic(expected: ('shield: v1 tez only',))]
-    fn test_shield_rejects_asset_new_mutation_via_v1_pin() {
-        // For v1 the pin fires before the sighash check.
-        let mut fixture = build_fixture();
-        fixture.asset_new = 0xAA;
         run_verify(@fixture);
     }
 
