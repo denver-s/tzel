@@ -78,6 +78,7 @@ mod with_verifier {
 
     fn kernel_shield_req_from_fixture(req: &ShieldReq) -> KernelShieldReq {
         KernelShieldReq {
+            asset_id: req.asset_id,
             pubkey_hash: req.pubkey_hash,
             v: req.v,
             fee: req.fee,

@@ -1772,6 +1772,13 @@ pub struct PaymentAddress {
 /// key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShieldReq {
+    /// L2 asset_id whose pool this shield is draining. The Cairo
+    /// circuit binds this into `cm_new`'s preimage; the kernel uses it
+    /// to look up the correct `(asset_id, pubkey_hash)` deposit pool.
+    /// Default = ASSET_TEZ for backward compatibility with serialized
+    /// pre-multiasset requests.
+    #[serde(with = "hex_f", default)]
+    pub asset_id: F,
     /// Identifies the deposit-balance pool this shield is draining.
     #[serde(with = "hex_f")]
     pub pubkey_hash: F,
@@ -1860,6 +1867,10 @@ pub struct UnshieldResp {
 
 #[derive(Clone, Debug)]
 pub struct PreparedUnshield {
+    /// L2 asset_id of the public exit, taken from the proof's
+    /// `asset_pub` public output. The kernel uses this to route the
+    /// outbox burn to the correct ticketer at L4.
+    asset_id: F,
     change_note: Option<(F, EncryptedNote)>,
     change_note_2: Option<(F, EncryptedNote)>,
     producer_note: (F, EncryptedNote),
@@ -1869,6 +1880,10 @@ pub struct PreparedUnshield {
 }
 
 impl PreparedUnshield {
+    pub fn asset_id(&self) -> &F {
+        &self.asset_id
+    }
+
     pub fn change_note(&self) -> Option<(&F, &EncryptedNote)> {
         self.change_note.as_ref().map(|(cm, enc)| (cm, enc))
     }
@@ -1896,6 +1911,11 @@ impl PreparedUnshield {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WithdrawalRecord {
+    /// L2 asset_id identifying which ticketer should burn this
+    /// withdrawal at the L1 outbox boundary. ASSET_TEZ for tez,
+    /// derive_asset_id(ticketer) for FA2 entries.
+    #[serde(with = "hex_f", default)]
+    pub asset_id: F,
     pub recipient: String,
     pub amount: u64,
 }
@@ -1970,11 +1990,16 @@ pub struct Ledger {
     pub root_history: VecDeque<F>,
     pub memos: Vec<(F, EncryptedNote)>,
     pub withdrawals: Vec<WithdrawalRecord>,
-    /// Per-pool deposit balance keyed by `deposit_pubkey_hash`. Each L1
-    /// bridge deposit credits the pool (creating it if absent); each shield
-    /// debits it. Multiple L1 deposits to the same `pubkey_hash` aggregate.
+    /// Per-pool deposit balance, indexed first by `asset_id` then by
+    /// `deposit_pubkey_hash`. Each L1 bridge deposit credits the inner
+    /// pool (creating it if absent); each shield debits it. Multiple
+    /// L1 deposits to the same `(asset, pubkey)` aggregate. Pools are
+    /// scoped by asset so an FA2 deposit cannot be drawn down by a tez
+    /// shield (and vice versa). Nested layout keeps JSON serialization
+    /// simple (string-keyed inner maps via serde_json's default
+    /// behaviour for `HashMap<F, _>` where F is a 32-byte array).
     #[serde(default)]
-    pub deposit_balances: HashMap<F, u64>,
+    pub deposit_balances: HashMap<F, HashMap<F, u64>>,
     /// Replay-protection set for shield commitments. Each successful
     /// shield records its `client_cm` here; a subsequent shield carrying
     /// the same `client_cm` is rejected. Without this, anyone could top
@@ -2005,22 +2030,38 @@ pub trait LedgerState {
     fn ensure_note_capacity(&self, additional: usize) -> Result<(), String>;
     fn append_note(&mut self, cm: F, enc: EncryptedNote) -> Result<usize, String>;
     fn snapshot_root(&mut self) -> Result<(), String>;
-    fn enqueue_withdrawal(&mut self, recipient: &str, amount: u64) -> Result<usize, String>;
+    fn enqueue_withdrawal(
+        &mut self,
+        asset_id: &F,
+        recipient: &str,
+        amount: u64,
+    ) -> Result<usize, String>;
     fn note_private_tx_applied(&mut self);
-    /// Look up a deposit pool's current balance. `None` if the pool key has
-    /// never been credited (or has been fully drained — implementations may
-    /// either return Some(0) or None here; both have the same semantics for
-    /// downstream code).
-    fn deposit_balance(&self, pubkey_hash: &F) -> Result<Option<u64>, String>;
-    /// Credit `amount` to the pool keyed by `pubkey_hash`. Creates the pool
-    /// if absent. Used by `apply_deposit` on every L1 bridge deposit.
-    fn credit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String>;
-    /// Debit `amount` from the pool keyed by `pubkey_hash`. The caller
+    /// Look up a deposit pool's current balance for `(asset_id, pubkey_hash)`.
+    /// `None` if the pool has never been credited (or has been fully
+    /// drained — implementations may return Some(0) or None; both have
+    /// the same downstream semantics).
+    fn deposit_balance(&self, asset_id: &F, pubkey_hash: &F) -> Result<Option<u64>, String>;
+    /// Credit `amount` to the pool keyed by `(asset_id, pubkey_hash)`.
+    /// Creates the pool if absent. Used by `apply_deposit` on every L1
+    /// bridge deposit.
+    fn credit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String>;
+    /// Debit `amount` from `(asset_id, pubkey_hash)`. The caller
     /// (`commit_prepared_shield`) has already confirmed the pool has at
     /// least `amount`; implementations may panic / error if invariants are
     /// violated. When the balance reaches zero the entry should be removed
     /// to bound storage.
-    fn debit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String>;
+    fn debit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String>;
     /// True iff a shield with this `client_cm` has already been applied.
     /// Used by `prepare_shield` to reject replays of an old shield proof
     /// after a pool top-up; without this, the kernel would mint a
@@ -2085,9 +2126,25 @@ impl Ledger {
     }
 
     /// Apply a bridge deposit (recipient must be a `deposit:<hex>` string).
-    /// Credits the deposit pool keyed by the parsed pubkey_hash.
+    /// Credits the deposit pool keyed by `(asset_id, pubkey_hash)`. The
+    /// convenience entrypoint defaults to `ASSET_TEZ` for callers that
+    /// have not been updated; multi-asset callers should use
+    /// `Self::deposit_asset` instead.
     pub fn deposit(&mut self, recipient: &str, amount: u64) -> Result<(), String> {
-        apply_deposit(self, recipient, amount)
+        apply_deposit(self, &ASSET_TEZ, recipient, amount)
+    }
+
+    /// Like `deposit` but lets the caller specify which asset's pool to
+    /// credit. Both `deposit` and `deposit_asset` write to the same
+    /// underlying storage; choose `deposit` only when you statically
+    /// know the asset is tez.
+    pub fn deposit_asset(
+        &mut self,
+        asset_id: &F,
+        recipient: &str,
+        amount: u64,
+    ) -> Result<(), String> {
+        apply_deposit(self, asset_id, recipient, amount)
     }
 
     pub fn shield(&mut self, req: &ShieldReq) -> Result<ShieldResp, String> {
@@ -2153,9 +2210,15 @@ impl LedgerState for Ledger {
         Ok(())
     }
 
-    fn enqueue_withdrawal(&mut self, recipient: &str, amount: u64) -> Result<usize, String> {
+    fn enqueue_withdrawal(
+        &mut self,
+        asset_id: &F,
+        recipient: &str,
+        amount: u64,
+    ) -> Result<usize, String> {
         let index = self.withdrawals.len();
         self.withdrawals.push(WithdrawalRecord {
+            asset_id: *asset_id,
             recipient: recipient.to_string(),
             amount,
         });
@@ -2164,31 +2227,51 @@ impl LedgerState for Ledger {
 
     fn note_private_tx_applied(&mut self) {}
 
-    fn deposit_balance(&self, pubkey_hash: &F) -> Result<Option<u64>, String> {
-        Ok(self.deposit_balances.get(pubkey_hash).copied())
+    fn deposit_balance(&self, asset_id: &F, pubkey_hash: &F) -> Result<Option<u64>, String> {
+        Ok(self
+            .deposit_balances
+            .get(asset_id)
+            .and_then(|inner| inner.get(pubkey_hash).copied()))
     }
 
-    fn credit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-        let entry = self.deposit_balances.entry(*pubkey_hash).or_insert(0);
+    fn credit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String> {
+        let inner = self.deposit_balances.entry(*asset_id).or_default();
+        let entry = inner.entry(*pubkey_hash).or_insert(0);
         *entry = entry
             .checked_add(amount)
             .ok_or_else(|| "deposit balance overflow".to_string())?;
         Ok(())
     }
 
-    fn debit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-        let balance = self
-            .deposit_balances
-            .get_mut(pubkey_hash)
-            .ok_or_else(|| {
-                format!(
-                    "deposit pool {} does not exist",
-                    hex::encode(pubkey_hash)
-                )
-            })?;
+    fn debit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String> {
+        let inner = self.deposit_balances.get_mut(asset_id).ok_or_else(|| {
+            format!(
+                "deposit pool ({}, {}) does not exist",
+                hex::encode(asset_id),
+                hex::encode(pubkey_hash),
+            )
+        })?;
+        let balance = inner.get_mut(pubkey_hash).ok_or_else(|| {
+            format!(
+                "deposit pool ({}, {}) does not exist",
+                hex::encode(asset_id),
+                hex::encode(pubkey_hash),
+            )
+        })?;
         if *balance < amount {
             return Err(format!(
-                "deposit pool {} balance {} too small to debit {}",
+                "deposit pool ({}, {}) balance {} too small to debit {}",
+                hex::encode(asset_id),
                 hex::encode(pubkey_hash),
                 *balance,
                 amount
@@ -2196,7 +2279,10 @@ impl LedgerState for Ledger {
         }
         *balance -= amount;
         if *balance == 0 {
-            self.deposit_balances.remove(pubkey_hash);
+            inner.remove(pubkey_hash);
+            if inner.is_empty() {
+                self.deposit_balances.remove(asset_id);
+            }
         }
         Ok(())
     }
@@ -2216,11 +2302,12 @@ impl LedgerState for Ledger {
 /// pool's balance. Multiple deposits to the same `pubkey_hash` aggregate.
 pub fn apply_deposit<S: LedgerState>(
     state: &mut S,
+    asset_id: &F,
     recipient: &str,
     amount: u64,
 ) -> Result<(), String> {
     let pubkey_hash = parse_deposit_recipient_pubkey_hash(recipient)?;
-    state.credit_deposit(&pubkey_hash, amount)
+    state.credit_deposit(asset_id, &pubkey_hash, amount)
 }
 
 /// All inputs needed to commit a shield. Built by `prepare_shield` from
@@ -2229,6 +2316,10 @@ pub fn apply_deposit<S: LedgerState>(
 /// without re-checking anything that was already validated.
 #[derive(Clone, Debug)]
 pub struct PreparedShield {
+    /// L2 asset_id whose pool will be debited. The shield request
+    /// supplies this and `prepare_shield` validates that the pool keyed
+    /// by `(asset_id, pubkey_hash)` has at least `debit` available.
+    pub asset_id: F,
     pub pubkey_hash: F,
     pub debit: u64,
     pub client_cm: F,
@@ -2238,6 +2329,9 @@ pub struct PreparedShield {
 }
 
 impl PreparedShield {
+    pub fn asset_id(&self) -> &F {
+        &self.asset_id
+    }
     pub fn pubkey_hash(&self) -> &F {
         &self.pubkey_hash
     }
@@ -2295,11 +2389,12 @@ pub fn prepare_shield<S: LedgerState>(
         .ok_or_else(|| "shield debit overflow".to_string())?;
 
     let pool_balance = state
-        .deposit_balance(&req.pubkey_hash)?
+        .deposit_balance(&req.asset_id, &req.pubkey_hash)?
         .ok_or_else(|| {
             format!(
-                "no deposit pool for pubkey_hash {}; submit an L1 bridge deposit first",
-                hex::encode(&req.pubkey_hash)
+                "no deposit pool for (asset_id {}, pubkey_hash {}); submit an L1 bridge deposit first",
+                hex::encode(&req.asset_id),
+                hex::encode(&req.pubkey_hash),
             )
         })?;
     if pool_balance < debit {
@@ -2353,6 +2448,7 @@ pub fn prepare_shield<S: LedgerState>(
     state.ensure_note_capacity(2)?;
 
     Ok(PreparedShield {
+        asset_id: req.asset_id,
         pubkey_hash: req.pubkey_hash,
         debit,
         client_cm: req.client_cm,
@@ -2377,7 +2473,7 @@ pub fn commit_prepared_shield<S: LedgerState>(
     state: &mut S,
     prepared: PreparedShield,
 ) -> Result<ShieldResp, String> {
-    state.debit_deposit(&prepared.pubkey_hash, prepared.debit)?;
+    state.debit_deposit(&prepared.asset_id, &prepared.pubkey_hash, prepared.debit)?;
     state.mark_applied_shield(prepared.client_cm)?;
     let index = state.append_note(prepared.client_cm, prepared.client_enc)?;
     let producer_index = state.append_note(prepared.producer_cm, prepared.producer_enc)?;
@@ -2556,6 +2652,7 @@ pub fn prepare_unshield<S: LedgerState>(
         }
     }
 
+    let mut asset_id_from_proof = ASSET_TEZ;
     match &req.proof {
         Proof::TrustMeBro => {}
         Proof::Stark {
@@ -2585,10 +2682,13 @@ pub fn prepare_unshield<S: LedgerState>(
             if tail[2 + n] != u64_to_felt(req.v_pub) {
                 return Err("proof v_pub mismatch".into());
             }
-            // asset_pub (v1: ASSET_TEZ)
-            if tail[3 + n] != ASSET_TEZ {
-                return Err("proof asset_pub mismatch — v1 requires tez".into());
-            }
+            // asset_pub is now read directly from the proof rather than
+            // pinned to ASSET_TEZ here. The kernel's registry check
+            // (E.3) decides whether this asset is bridgeable; in the
+            // pure-tez in-memory ledger any registered asset value
+            // is accepted (the registry membership check is at the
+            // kernel boundary, not in core).
+            asset_id_from_proof = tail[3 + n];
             if tail[4 + n] != u64_to_felt(req.fee) {
                 return Err("proof fee mismatch".into());
             }
@@ -2632,6 +2732,7 @@ pub fn prepare_unshield<S: LedgerState>(
     state.ensure_note_capacity(additional_notes)?;
 
     Ok(PreparedUnshield {
+        asset_id: asset_id_from_proof,
         change_note: if req.cm_change != ZERO {
             Some((
                 req.cm_change,
@@ -2682,7 +2783,7 @@ pub fn commit_prepared_unshield<S: LedgerState>(
     state: &mut S,
     prepared: PreparedUnshield,
 ) -> Result<UnshieldResp, String> {
-    state.enqueue_withdrawal(&prepared.recipient, prepared.amount)?;
+    state.enqueue_withdrawal(&prepared.asset_id, &prepared.recipient, prepared.amount)?;
 
     let change_index = if let Some((cm, enc)) = prepared.change_note {
         Some(state.append_note(cm, enc)?)
@@ -2986,22 +3087,37 @@ mod tests {
             self.inner.snapshot_root()
         }
 
-        fn enqueue_withdrawal(&mut self, recipient: &str, amount: u64) -> Result<usize, String> {
-            self.inner.enqueue_withdrawal(recipient, amount)
+        fn enqueue_withdrawal(
+            &mut self,
+            asset_id: &F,
+            recipient: &str,
+            amount: u64,
+        ) -> Result<usize, String> {
+            self.inner.enqueue_withdrawal(asset_id, recipient, amount)
         }
 
         fn note_private_tx_applied(&mut self) {}
 
-        fn deposit_balance(&self, pubkey_hash: &F) -> Result<Option<u64>, String> {
-            self.inner.deposit_balance(pubkey_hash)
+        fn deposit_balance(&self, asset_id: &F, pubkey_hash: &F) -> Result<Option<u64>, String> {
+            self.inner.deposit_balance(asset_id, pubkey_hash)
         }
 
-        fn credit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-            self.inner.credit_deposit(pubkey_hash, amount)
+        fn credit_deposit(
+            &mut self,
+            asset_id: &F,
+            pubkey_hash: &F,
+            amount: u64,
+        ) -> Result<(), String> {
+            self.inner.credit_deposit(asset_id, pubkey_hash, amount)
         }
 
-        fn debit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-            self.inner.debit_deposit(pubkey_hash, amount)
+        fn debit_deposit(
+            &mut self,
+            asset_id: &F,
+            pubkey_hash: &F,
+            amount: u64,
+        ) -> Result<(), String> {
+            self.inner.debit_deposit(asset_id, pubkey_hash, amount)
         }
 
         fn has_applied_shield(&self, client_cm: &F) -> Result<bool, String> {
@@ -3056,22 +3172,37 @@ mod tests {
             self.inner.snapshot_root()
         }
 
-        fn enqueue_withdrawal(&mut self, _recipient: &str, _amount: u64) -> Result<usize, String> {
+        fn enqueue_withdrawal(
+            &mut self,
+            _asset_id: &F,
+            _recipient: &str,
+            _amount: u64,
+        ) -> Result<usize, String> {
             Err("withdrawal queue unavailable".into())
         }
 
         fn note_private_tx_applied(&mut self) {}
 
-        fn deposit_balance(&self, pubkey_hash: &F) -> Result<Option<u64>, String> {
-            self.inner.deposit_balance(pubkey_hash)
+        fn deposit_balance(&self, asset_id: &F, pubkey_hash: &F) -> Result<Option<u64>, String> {
+            self.inner.deposit_balance(asset_id, pubkey_hash)
         }
 
-        fn credit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-            self.inner.credit_deposit(pubkey_hash, amount)
+        fn credit_deposit(
+            &mut self,
+            asset_id: &F,
+            pubkey_hash: &F,
+            amount: u64,
+        ) -> Result<(), String> {
+            self.inner.credit_deposit(asset_id, pubkey_hash, amount)
         }
 
-        fn debit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-            self.inner.debit_deposit(pubkey_hash, amount)
+        fn debit_deposit(
+            &mut self,
+            asset_id: &F,
+            pubkey_hash: &F,
+            amount: u64,
+        ) -> Result<(), String> {
+            self.inner.debit_deposit(asset_id, pubkey_hash, amount)
         }
 
         fn has_applied_shield(&self, client_cm: &F) -> Result<bool, String> {
@@ -3129,6 +3260,7 @@ mod tests {
             .unwrap();
         let resp = ledger
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee: MIN_TX_FEE,
                 v: amount,
@@ -3885,11 +4017,14 @@ mod tests {
         // would push a pool past u64::MAX must error rather than wrap.
         let mut ledger = Ledger::new();
         let pubkey_hash = u(0xC0);
-        ledger.credit_deposit(&pubkey_hash, u64::MAX).unwrap();
-        let err = ledger.credit_deposit(&pubkey_hash, 1).unwrap_err();
+        ledger.credit_deposit(&ASSET_TEZ, &pubkey_hash, u64::MAX).unwrap();
+        let err = ledger.credit_deposit(&ASSET_TEZ, &pubkey_hash, 1).unwrap_err();
         assert!(err.contains("overflow"), "{}", err);
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger
+                .deposit_balances
+                .get(&ASSET_TEZ)
+                .and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(u64::MAX)
         );
     }
@@ -3900,17 +4035,23 @@ mod tests {
         // pool entry (only debits to exactly the remaining balance do).
         let mut ledger = Ledger::new();
         let pubkey_hash = u(0xD0);
-        ledger.credit_deposit(&pubkey_hash, 100).unwrap();
-        ledger.debit_deposit(&pubkey_hash, 0).unwrap();
+        ledger.credit_deposit(&ASSET_TEZ, &pubkey_hash, 100).unwrap();
+        ledger.debit_deposit(&ASSET_TEZ, &pubkey_hash, 0).unwrap();
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger
+                .deposit_balances
+                .get(&ASSET_TEZ)
+                .and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(100)
         );
         // Full drain removes the entry.
-        ledger.debit_deposit(&pubkey_hash, 100).unwrap();
-        assert!(!ledger.deposit_balances.contains_key(&pubkey_hash));
+        ledger.debit_deposit(&ASSET_TEZ, &pubkey_hash, 100).unwrap();
+        assert!(ledger
+            .deposit_balances
+            .get(&ASSET_TEZ)
+            .map_or(true, |inner| !inner.contains_key(&pubkey_hash)));
         // Debiting an absent pool errors.
-        let err = ledger.debit_deposit(&pubkey_hash, 1).unwrap_err();
+        let err = ledger.debit_deposit(&ASSET_TEZ, &pubkey_hash, 1).unwrap_err();
         assert!(err.contains("does not exist"), "{}", err);
     }
 
@@ -4386,6 +4527,7 @@ mod tests {
         let resp = apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4458,6 +4600,7 @@ mod tests {
             .unwrap();
 
         let req_a = ShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             fee,
             v,
@@ -4481,6 +4624,7 @@ mod tests {
         ledger.shield(&req_a).expect("first shield");
 
         let req_b = ShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             fee,
             v,
@@ -4536,6 +4680,7 @@ mod tests {
         let producer_memo_hash = memo_ct_hash(&producer_enc);
 
         let req = ShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             fee,
             v,
@@ -4584,7 +4729,7 @@ mod tests {
         // Topup is still in the pool (rejected request must not have
         // partially debited).
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(debit)
         );
         // The applied-shield set has exactly the one cm.
@@ -4611,7 +4756,7 @@ mod tests {
         // Two L1 deposits aggregating to debit + slack.
         ledger.deposit(&recipient, debit / 2).unwrap();
         ledger.deposit(&recipient, debit - debit / 2 + 50).unwrap();
-        assert_eq!(ledger.deposit_balances.get(&pubkey_hash).copied(), Some(debit + 50));
+        assert_eq!(ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()), Some(debit + 50));
 
         let (enc, cm) = deterministic_note(&addr, v, u(31), Some(b"shield"));
         let (producer_enc, producer_cm) =
@@ -4622,6 +4767,7 @@ mod tests {
         apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4646,7 +4792,7 @@ mod tests {
         .unwrap();
 
         // 50 mutez left in the pool after the first shield.
-        assert_eq!(ledger.deposit_balances.get(&pubkey_hash).copied(), Some(50));
+        assert_eq!(ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()), Some(50));
     }
 
     #[test]
@@ -4670,6 +4816,7 @@ mod tests {
         let err = apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4711,6 +4858,7 @@ mod tests {
         let err = apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4727,7 +4875,7 @@ mod tests {
         assert!(err.contains("balance"), "err = {}", err);
         // Pool still has its underfunded balance (rejection left state untouched).
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(debit - 1)
         );
         assert!(ledger.memos.is_empty());
@@ -4755,6 +4903,7 @@ mod tests {
         let err = apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4782,7 +4931,7 @@ mod tests {
         assert!(err.contains("public output length mismatch"), "err = {}", err);
         // Pool balance untouched.
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(debit)
         );
         assert!(ledger.memos.is_empty());
@@ -4815,6 +4964,7 @@ mod tests {
 
         let err = ledger
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -4840,7 +4990,7 @@ mod tests {
         assert!(err.contains("pubkey_hash mismatch"), "err = {}", err);
         // Pool balance untouched.
         assert_eq!(
-            ledger.deposit_balances.get(&pubkey_hash).copied(),
+            ledger.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash).copied()),
             Some(debit)
         );
     }
@@ -4880,6 +5030,7 @@ mod tests {
         // Drain ledger A succeeds (TrustMeBro skips proof public-output check).
         ledger_a
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash: pubkey_hash_a,
                 fee,
                 v,
@@ -4896,6 +5047,7 @@ mod tests {
         // deployment B because output[0] disagrees.
         let err = ledger_b
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash: pubkey_hash_b,
                 fee,
                 v,
@@ -4921,7 +5073,7 @@ mod tests {
         assert!(err.contains("auth_domain mismatch"), "err = {}", err);
         // Ledger B's pool is intact.
         assert_eq!(
-            ledger_b.deposit_balances.get(&pubkey_hash_b).copied(),
+            ledger_b.deposit_balances.get(&ASSET_TEZ).and_then(|inner| inner.get(&pubkey_hash_b).copied()),
             Some(debit)
         );
     }
@@ -5184,6 +5336,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 50,
             }]
@@ -5241,6 +5394,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 50,
             }]
@@ -5331,6 +5485,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 1,
             }]
@@ -5407,6 +5562,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 1,
             }]
@@ -5431,6 +5587,7 @@ mod tests {
         let err = apply_shield(
             &mut ledger,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee: MIN_TX_FEE - 1,
                 v: 125,
@@ -5477,6 +5634,7 @@ mod tests {
         let err = apply_shield(
             &mut state,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee: MIN_TX_FEE,
                 v: 125,
@@ -5515,6 +5673,7 @@ mod tests {
         let err = apply_shield(
             &mut state,
             &ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee: MIN_TX_FEE,
                 v: 125,
@@ -5983,12 +6142,15 @@ mod tests {
         );
     }
 
-    /// `apply_unshield`'s v1 single-bridge pin: even if the prover
-    /// emits a non-tez asset_pub in the public outputs and signs over
-    /// it, the kernel must refuse. Today this is the canonical "v1
-    /// requires tez" rejection path.
+    /// Phase E.2 removes the core-side `asset_pub == ASSET_TEZ` pin: the
+    /// in-memory `Ledger` is asset-agnostic and merely records the
+    /// asset_id in its `WithdrawalRecord`. The bridge-registry check
+    /// (which IS the v1 "tez only" enforcement) moves to the rollup
+    /// kernel in Phase E.3. Until then, a non-tez asset_pub flows
+    /// through core, ending up stored on the withdrawal record where a
+    /// later FA2 outbox dispatch will look up its ticketer.
     #[test]
-    fn test_apply_unshield_rejects_non_tez_asset_pub_in_v1() {
+    fn test_apply_unshield_records_asset_pub_from_proof_outputs() {
         let (mut ledger, addr, nk_spend, shield_resp) =
             shielded_note_setup(0xC0, "alice", 180_000);
         let root = ledger.tree.root();
@@ -5998,7 +6160,7 @@ mod tests {
         let (enc_fee, cm_fee) = deterministic_note(&addr, 29_970, u(0xA2), Some(b"dal"));
         let primary = u(0xFA2);
 
-        let result = apply_unshield(
+        apply_unshield(
             &mut ledger,
             &UnshieldReq {
                 root,
@@ -6017,7 +6179,7 @@ mod tests {
                     root,
                     nf,
                     u(50),
-                    primary, // non-tez asset_pub — v1 must reject
+                    primary, // non-tez asset_pub — recorded, not rejected
                     u(MIN_TX_FEE),
                     hash(TEST_L1_RECIPIENT.as_bytes()),
                     cm_change,
@@ -6028,12 +6190,13 @@ mod tests {
                     memo_ct_hash(&enc_fee),
                 ]),
             },
-        );
+        )
+        .expect("core no longer pins asset_pub == ASSET_TEZ");
 
-        let err = result.expect_err("apply_unshield must reject non-tez asset_pub in v1");
-        assert!(
-            err.contains("asset_pub") || err.contains("v1") || err.contains("tez"),
-            "rejection should mention asset_pub/v1/tez, got: {err}",
+        assert_eq!(
+            ledger.withdrawals.last().expect("withdrawal recorded").asset_id,
+            primary,
+            "withdrawal record should carry the asset_pub from the proof",
         );
     }
 

@@ -293,6 +293,7 @@ pub fn generate_interop_scenario() -> InteropScenario {
         },
         expected: InteropExpected {
             withdrawals: vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: INTEROP_L1_RECIPIENT.into(),
                 amount: 99_999,
             }],
@@ -388,6 +389,7 @@ mod tests {
         assert_eq!(
             scenario.expected.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: INTEROP_L1_RECIPIENT.into(),
                 amount: 99_999,
             }]
@@ -425,6 +427,7 @@ mod tests {
         assert_eq!(
             reparsed.expected.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: INTEROP_L1_RECIPIENT.into(),
                 amount: 99_999,
             }]

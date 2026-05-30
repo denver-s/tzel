@@ -1581,6 +1581,7 @@ mod tests {
         let client_enc = producer_enc.clone();
         encode_kernel_inbox_message(&KernelInboxMessage::Shield(
             tzel_core::kernel_wire::KernelShieldReq {
+                asset_id: tzel_core::ASSET_TEZ,
                 pubkey_hash,
                 fee: 100_000,
                 v: 25,

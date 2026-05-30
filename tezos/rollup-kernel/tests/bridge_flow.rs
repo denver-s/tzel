@@ -29,7 +29,7 @@ use tzel_core::kernel_wire::{
 use tzel_core::kernel_wire::{
     KernelShieldReq, KernelStarkProof, KernelTransferReq, KernelUnshieldReq,
 };
-use tzel_core::{default_auth_domain, deposit_recipient_string, hash, ProgramHashes, F, ZERO};
+use tzel_core::{default_auth_domain, deposit_recipient_string, hash, ProgramHashes, ASSET_TEZ, F, ZERO};
 
 /// Test-only deterministic pubkey_hash derived from a label. The real
 /// pubkey_hash is `H(0x04, auth_domain, auth_root, auth_pub_seed,
@@ -270,8 +270,13 @@ fn bridge_deposit_requires_configuration_and_recovers_after_external_configurati
     assert_eq!(stats.raw_input_count, 4);
     // Probe the durable balance entry directly: read_ledger does not
     // enumerate deposit balances (no index by design — bounded storage).
+    // Phase E.2 keys the pool by `(asset_id, pubkey_hash)`; until E.3
+    // wires ticketer → asset_id routing, every bridge deposit lands in
+    // the tez (ASSET_TEZ) lane.
     let pubkey_hash = pubkey_hash_from_label("alice");
     let mut balance_path = b"/tzel/v1/state/deposits/balance/".to_vec();
+    balance_path.extend_from_slice(hex::encode(ASSET_TEZ).as_bytes());
+    balance_path.push(b'/');
     balance_path.extend_from_slice(hex::encode(pubkey_hash).as_bytes());
     let bytes = host.read_store(&balance_path, 8).expect("balance entry");
     assert_eq!(u64::from_le_bytes(bytes.try_into().unwrap()), 12);
@@ -378,7 +383,7 @@ fn verified_bridge_roundtrip_uses_checked_in_real_proofs() {
         read_last_result(&host).unwrap(),
         KernelResult::Deposit
     ));
-    let balance_path = tzel_rollup_kernel::deposit_balance_path(&fixture.shield.pubkey_hash);
+    let balance_path = tzel_rollup_kernel::deposit_balance_path(&ASSET_TEZ, &fixture.shield.pubkey_hash);
     assert_eq!(
         host.read_store(&balance_path, 8)
             .map(|b| u64::from_le_bytes(b.try_into().unwrap())),
@@ -574,7 +579,7 @@ fn verified_shield_rejects_tampered_client_note_without_mutating_pool() {
     apply_fixture_deposit(&mut host, fixture, 2);
 
     let before_shield = read_ledger(&host).unwrap();
-    let balance_path = tzel_rollup_kernel::deposit_balance_path(&fixture.shield.pubkey_hash);
+    let balance_path = tzel_rollup_kernel::deposit_balance_path(&ASSET_TEZ, &fixture.shield.pubkey_hash);
     let pool_balance_before = host
         .read_store(&balance_path, 8)
         .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
@@ -768,7 +773,7 @@ fn verified_shield_rejects_replay_after_pool_topup() {
         after_shield.tree.leaves.len(),
         "replay must not append duplicate notes to the tree"
     );
-    let balance_path = tzel_rollup_kernel::deposit_balance_path(&fixture.shield.pubkey_hash);
+    let balance_path = tzel_rollup_kernel::deposit_balance_path(&ASSET_TEZ, &fixture.shield.pubkey_hash);
     let pool_balance = host
         .read_store(&balance_path, 8)
         .map(|b| {
@@ -926,6 +931,7 @@ fn kernel_proof_from_fixture(proof: &Proof) -> KernelStarkProof {
 #[cfg(feature = "proof-verifier")]
 fn kernel_shield_req_from_fixture(req: &ShieldReq) -> KernelShieldReq {
     KernelShieldReq {
+        asset_id: req.asset_id,
         pubkey_hash: req.pubkey_hash,
         v: req.v,
         fee: req.fee,

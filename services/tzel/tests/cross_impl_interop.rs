@@ -56,6 +56,7 @@ fn shield_req(step: &InteropShieldStep, auth_domain: &F) -> (F, ShieldReq) {
         step.producer_cm.as_slice(),
     ].concat());
     let req = ShieldReq {
+        asset_id: ASSET_TEZ,
         pubkey_hash,
         v: step.v,
         fee: step.fee,

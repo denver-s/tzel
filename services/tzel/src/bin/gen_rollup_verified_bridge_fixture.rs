@@ -291,6 +291,7 @@ fn build_fixture() -> Result<VerifiedBridgeFixture, String> {
         program_hashes,
         bridge_ticketer: BRIDGE_TICKETER.into(),
         shield: ShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash: shield_pubkey_hash,
             v: SHIELD_AMOUNT,
             fee: MIN_TX_FEE,

@@ -393,11 +393,17 @@ impl<H: Host> LedgerState for DurableLedgerState<'_, H> {
         Ok(())
     }
 
-    fn enqueue_withdrawal(&mut self, recipient: &str, amount: u64) -> Result<usize, String> {
+    fn enqueue_withdrawal(
+        &mut self,
+        asset_id: &F,
+        recipient: &str,
+        amount: u64,
+    ) -> Result<usize, String> {
         let index = self.read_u64(PATH_WITHDRAWAL_COUNT)?.unwrap_or(0);
         self.write_withdrawal_at_index(
             index,
             &WithdrawalRecord {
+                asset_id: *asset_id,
                 recipient: recipient.to_string(),
                 amount,
             },
@@ -417,8 +423,8 @@ impl<H: Host> LedgerState for DurableLedgerState<'_, H> {
             .write_store(PATH_PRIVATE_TX_COUNT_IN_LEVEL, &next.to_le_bytes());
     }
 
-    fn deposit_balance(&self, pubkey_hash: &F) -> Result<Option<u64>, String> {
-        let path = deposit_balance_path(pubkey_hash);
+    fn deposit_balance(&self, asset_id: &F, pubkey_hash: &F) -> Result<Option<u64>, String> {
+        let path = deposit_balance_path(asset_id, pubkey_hash);
         match self.host.read_store(&path, 8) {
             None => Ok(None),
             // Empty bytes = best-effort-deleted (pool was drained).
@@ -435,8 +441,13 @@ impl<H: Host> LedgerState for DurableLedgerState<'_, H> {
         }
     }
 
-    fn credit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-        let path = deposit_balance_path(pubkey_hash);
+    fn credit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String> {
+        let path = deposit_balance_path(asset_id, pubkey_hash);
         // Empty bytes indicate a previously fully-drained pool (the WASM
         // PVM has no native delete; `apply_durable_shield_commit` writes
         // an empty value as the closest analogue). Treat that the same
@@ -463,20 +474,27 @@ impl<H: Host> LedgerState for DurableLedgerState<'_, H> {
         Ok(())
     }
 
-    fn debit_deposit(&mut self, pubkey_hash: &F, amount: u64) -> Result<(), String> {
-        let path = deposit_balance_path(pubkey_hash);
+    fn debit_deposit(
+        &mut self,
+        asset_id: &F,
+        pubkey_hash: &F,
+        amount: u64,
+    ) -> Result<(), String> {
+        let path = deposit_balance_path(asset_id, pubkey_hash);
         let raw = self.host.read_store(&path, 8).ok_or_else(|| {
             format!(
-                "deposit pool {} does not exist",
-                hex::encode(pubkey_hash)
+                "deposit pool ({}, {}) does not exist",
+                hex::encode(asset_id),
+                hex::encode(pubkey_hash),
             )
         })?;
         if raw.is_empty() {
             // Pool was previously drained (best-effort delete via empty
             // write). Treat as if the entry were absent.
             return Err(format!(
-                "deposit pool {} does not exist",
-                hex::encode(pubkey_hash)
+                "deposit pool ({}, {}) does not exist",
+                hex::encode(asset_id),
+                hex::encode(pubkey_hash),
             ));
         }
         if raw.len() != 8 {
@@ -485,7 +503,8 @@ impl<H: Host> LedgerState for DurableLedgerState<'_, H> {
         let current = u64::from_le_bytes(raw.try_into().unwrap());
         if current < amount {
             return Err(format!(
-                "deposit pool {} balance {} too small to debit {}",
+                "deposit pool ({}, {}) balance {} too small to debit {}",
+                hex::encode(asset_id),
                 hex::encode(pubkey_hash),
                 current,
                 amount
@@ -584,9 +603,11 @@ fn nullifier_path(nf: &F) -> Vec<u8> {
 /// this path is a u64 little-endian. An empty value (zero-length read) is
 /// treated as "pool fully drained, key unreachable" — consumers should
 /// behave as if the key were absent.
-pub fn deposit_balance_path(pubkey_hash: &F) -> Vec<u8> {
-    let mut path = Vec::with_capacity(PATH_DEPOSIT_BALANCE_PREFIX.len() + 64);
+pub fn deposit_balance_path(asset_id: &F, pubkey_hash: &F) -> Vec<u8> {
+    let mut path = Vec::with_capacity(PATH_DEPOSIT_BALANCE_PREFIX.len() + 64 + 1 + 64);
     path.extend_from_slice(PATH_DEPOSIT_BALANCE_PREFIX);
+    path.extend_from_slice(hex::encode(asset_id).as_bytes());
+    path.push(b'/');
     path.extend_from_slice(hex::encode(pubkey_hash).as_bytes());
     path
 }
@@ -599,9 +620,15 @@ fn applied_shield_path(client_cm: &F) -> Vec<u8> {
 }
 
 
+/// Durable layout: 32-byte asset_id || 8-byte LE amount || 4-byte LE
+/// recipient length || recipient utf-8 bytes. Pre-multiasset records
+/// had no asset_id field; they cannot be decoded with this function
+/// (an upgrade-time migration is out of scope for this branch, which
+/// has no live durable data).
 fn encode_withdrawal_record(record: &WithdrawalRecord) -> Vec<u8> {
     let recipient = record.recipient.as_bytes();
-    let mut bytes = Vec::with_capacity(12 + recipient.len());
+    let mut bytes = Vec::with_capacity(32 + 12 + recipient.len());
+    bytes.extend_from_slice(&record.asset_id);
     bytes.extend_from_slice(&record.amount.to_le_bytes());
     bytes.extend_from_slice(
         &u32::try_from(recipient.len())
@@ -613,17 +640,23 @@ fn encode_withdrawal_record(record: &WithdrawalRecord) -> Vec<u8> {
 }
 
 fn decode_withdrawal_record(bytes: &[u8]) -> Result<WithdrawalRecord, String> {
-    if bytes.len() < 12 {
+    if bytes.len() < 32 + 12 {
         return Err("withdrawal record too short".into());
     }
-    let amount = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-    let recipient_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    if bytes.len() != 12 + recipient_len {
+    let mut asset_id = ZERO;
+    asset_id.copy_from_slice(&bytes[..32]);
+    let amount = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+    let recipient_len = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+    if bytes.len() != 44 + recipient_len {
         return Err("withdrawal record length mismatch".into());
     }
-    let recipient = String::from_utf8(bytes[12..].to_vec())
+    let recipient = String::from_utf8(bytes[44..].to_vec())
         .map_err(|_| "withdrawal recipient is not UTF-8".to_string())?;
-    Ok(WithdrawalRecord { recipient, amount })
+    Ok(WithdrawalRecord {
+        asset_id,
+        recipient,
+        amount,
+    })
 }
 
 fn encode_withdrawal_outbox_message(
@@ -1129,6 +1162,7 @@ fn prepare_unshield_outbox<H: Host>(
     encode_withdrawal_outbox_message(
         &ticketer,
         &WithdrawalRecord {
+            asset_id: *req.asset_id(),
             recipient: req.recipient().to_string(),
             amount: req.amount(),
         },
@@ -1260,6 +1294,7 @@ fn prepare_durable_unshield_commit<H: Host>(
         nullifiers: prepared.nullifiers().to_vec(),
         withdrawal_index,
         withdrawal_record: WithdrawalRecord {
+            asset_id: *prepared.asset_id(),
             recipient: prepared.recipient().to_string(),
             amount: prepared.amount(),
         },
@@ -1347,18 +1382,20 @@ fn prepare_durable_shield_commit<H: Host>(
     prepared: &tzel_core::PreparedShield,
 ) -> Result<PreparedDurableShieldCommit, String> {
     // 1. Validate the pool balance without mutating.
-    let balance_path = deposit_balance_path(prepared.pubkey_hash());
+    let balance_path = deposit_balance_path(prepared.asset_id(), prepared.pubkey_hash());
     let balance_bytes = ledger.host.read_store(&balance_path, 8).ok_or_else(|| {
         format!(
-            "no deposit pool for pubkey_hash {}; submit an L1 bridge deposit first",
-            hex::encode(prepared.pubkey_hash())
+            "no deposit pool for (asset_id {}, pubkey_hash {}); submit an L1 bridge deposit first",
+            hex::encode(prepared.asset_id()),
+            hex::encode(prepared.pubkey_hash()),
         )
     })?;
     if balance_bytes.is_empty() {
         // Best-effort-deleted pool — treat as missing.
         return Err(format!(
-            "no deposit pool for pubkey_hash {}; submit an L1 bridge deposit first",
-            hex::encode(prepared.pubkey_hash())
+            "no deposit pool for (asset_id {}, pubkey_hash {}); submit an L1 bridge deposit first",
+            hex::encode(prepared.asset_id()),
+            hex::encode(prepared.pubkey_hash()),
         ));
     }
     if balance_bytes.len() != 8 {
@@ -1370,7 +1407,8 @@ fn prepare_durable_shield_commit<H: Host>(
     let balance = u64::from_le_bytes(balance_bytes.try_into().unwrap());
     if balance < prepared.debit() {
         return Err(format!(
-            "deposit pool {} balance {} too small for v + fee + producer_fee = {}",
+            "deposit pool ({}, {}) balance {} too small for v + fee + producer_fee = {}",
+            hex::encode(prepared.asset_id()),
             hex::encode(prepared.pubkey_hash()),
             balance,
             prepared.debit()
@@ -1576,7 +1614,13 @@ fn apply_input_message<H: Host>(host: &mut H, input: &InputMessage) -> Option<Ke
         ParsedRollupMessage::Ignore => unreachable!("ignored messages are handled above"),
         ParsedRollupMessage::Deposit(req) => (|| -> Result<KernelResult, String> {
             validate_bridge_deposit(&ledger, &req)?;
-            apply_deposit(&mut ledger, &req.recipient, req.amount).map(|_| KernelResult::Deposit)
+            // E.2: deposits are credited per-(asset, pubkey). In E.3
+            // the kernel will derive asset_id from the ticketer
+            // address (one-ticketer-per-asset) and reject deposits
+            // from any ticketer not in the registry. Until then,
+            // every deposit goes to the tez pool.
+            apply_deposit(&mut ledger, &tzel_core::ASSET_TEZ, &req.recipient, req.amount)
+                .map(|_| KernelResult::Deposit)
         })(),
         ParsedRollupMessage::Kernel(message) => apply_kernel_message(&mut ledger, message),
     };
@@ -2324,7 +2368,7 @@ mod tests {
         // Probe the durable balance entry directly: read_ledger does not
         // enumerate deposit balances (no index by design — bounded
         // storage), so callers verify specific pools by path.
-        let balance_path = deposit_balance_path(&pubkey_hash_from_label("alice"));
+        let balance_path = deposit_balance_path(&ASSET_TEZ, &pubkey_hash_from_label("alice"));
         let bytes = host.read_store(&balance_path, 8).expect("balance entry");
         let balance = u64::from_le_bytes(bytes.try_into().unwrap());
         assert_eq!(balance, 75);
@@ -2367,12 +2411,14 @@ mod tests {
             let mut state = DurableLedgerState::new(&mut host).unwrap();
             apply_deposit(
                 &mut state,
+                &ASSET_TEZ,
                 &deposit_recipient_string(&pubkey_hash),
                 v + producer_fee + MIN_TX_FEE,
             )
             .unwrap();
         }
         let shield_req = KernelShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             fee: MIN_TX_FEE,
             producer_fee,
@@ -2394,7 +2440,7 @@ mod tests {
 
         // Pool was fully drained by the shield — durable balance entry is
         // either absent or empty (kernel writes empty bytes to bound storage).
-        let balance_path = deposit_balance_path(&pubkey_hash);
+        let balance_path = deposit_balance_path(&ASSET_TEZ, &pubkey_hash);
         let after_shield = host.read_store(&balance_path, 8);
         assert!(after_shield.as_ref().map(|b| b.is_empty()).unwrap_or(true));
         let ledger = read_ledger(&host).unwrap();
@@ -2513,6 +2559,7 @@ mod tests {
         let client_enc = sample_encrypted_note(&address, 50, client_rseed, b"shield");
         let client_cm = sample_commitment(&address, 50, client_rseed);
         let payload = encode_external_kernel_message(&KernelInboxMessage::Shield(KernelShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash: pubkey_hash_from_label("alice"),
             fee: MIN_TX_FEE,
             producer_fee,
@@ -2544,7 +2591,7 @@ mod tests {
         let _ = producer_fee;
         // DAL hash mismatch: kernel rejects, no balance entry mutated.
         let balance_path =
-            deposit_balance_path(&pubkey_hash_from_label("alice"));
+            deposit_balance_path(&ASSET_TEZ, &pubkey_hash_from_label("alice"));
         assert!(host.read_store(&balance_path, 8).is_none());
         let ledger = read_ledger(&host).unwrap();
         assert!(ledger.tree.leaves.is_empty());
@@ -2732,6 +2779,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: recipient.clone(),
                 amount: 33,
             }]
@@ -2880,6 +2928,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: sample_l1_receiver().into(),
                 amount: 33,
             }]
@@ -2951,6 +3000,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: sample_l1_receiver().into(),
                 amount: 33,
             }]
@@ -3169,6 +3219,7 @@ mod tests {
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: sample_l1_receiver().into(),
                 amount: 33,
             }]
@@ -3416,7 +3467,7 @@ mod tests {
         let ledger = read_ledger(&host).unwrap();
         assert_eq!(ledger.auth_domain, config.auth_domain);
         let balance_path =
-            deposit_balance_path(&pubkey_hash_from_label("alice"));
+            deposit_balance_path(&ASSET_TEZ, &pubkey_hash_from_label("alice"));
         let bytes = host.read_store(&balance_path, 8).expect("balance entry");
         assert_eq!(u64::from_le_bytes(bytes.try_into().unwrap()), 12);
         assert!(matches!(
@@ -3496,6 +3547,7 @@ mod tests {
         let client_enc = sample_encrypted_note(&address, 50, client_rseed, b"shield");
         let client_cm = sample_commitment(&address, 50, client_rseed);
         let shield_req = KernelShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash: pubkey_hash_from_label("alice"),
             fee: MIN_TX_FEE,
             producer_fee,
@@ -3561,6 +3613,7 @@ mod tests {
                 id: 2,
                 payload: encode_external_kernel_message(&KernelInboxMessage::Shield(
                     KernelShieldReq {
+                        asset_id: ASSET_TEZ,
                         pubkey_hash: pubkey_hash_from_label("alice"),
                         v: 50,
                         fee: MIN_TX_FEE,
@@ -3864,7 +3917,7 @@ mod tests {
         run_with_host(&mut host);
 
         // Single aggregated balance: 100_000 + 1.
-        let balance_path = deposit_balance_path(&pubkey_hash);
+        let balance_path = deposit_balance_path(&ASSET_TEZ, &pubkey_hash);
         let bytes = host.read_store(&balance_path, 8).expect("balance entry");
         assert_eq!(u64::from_le_bytes(bytes.try_into().unwrap()), 100_001);
     }
@@ -3880,7 +3933,7 @@ mod tests {
         install_test_bridge(&mut host);
         install_test_verifier(&mut host);
         let pubkey_hash = pubkey_hash_from_label("alice");
-        let balance_path = deposit_balance_path(&pubkey_hash);
+        let balance_path = deposit_balance_path(&ASSET_TEZ, &pubkey_hash);
 
         // Simulate the post-drain state: the apply step writes empty bytes.
         host.write_store(&balance_path, &[]);
@@ -3908,31 +3961,50 @@ mod tests {
 
     #[test]
     fn withdrawal_record_roundtrip_and_decode_guards() {
+        // Phase E.2 layout: 32B asset_id || 8B LE amount ||
+        //                   4B LE recipient_len || recipient bytes.
         let record = WithdrawalRecord {
+            asset_id: ASSET_TEZ,
             recipient: sample_l1_receiver().into(),
             amount: 33,
         };
         let encoded = encode_withdrawal_record(&record);
         assert_eq!(decode_withdrawal_record(&encoded).unwrap(), record);
 
-        assert!(decode_withdrawal_record(&encoded[..11])
+        // Truncated below the 44B fixed prefix should fail "too short".
+        assert!(decode_withdrawal_record(&encoded[..43])
             .unwrap_err()
             .contains("too short"));
 
+        // Corrupt the recipient_len field (now at bytes 40..44).
         let mut bad_len = encoded.clone();
-        bad_len[8..12].copy_from_slice(&(999u32).to_le_bytes());
+        bad_len[40..44].copy_from_slice(&(999u32).to_le_bytes());
         assert!(decode_withdrawal_record(&bad_len)
             .unwrap_err()
             .contains("length mismatch"));
 
+        // First recipient byte sits at index 44 now.
         let mut bad_utf8 = encode_withdrawal_record(&WithdrawalRecord {
+            asset_id: ASSET_TEZ,
             recipient: "ok".into(),
             amount: 1,
         });
-        bad_utf8[12] = 0xFF;
+        bad_utf8[44] = 0xFF;
         assert!(decode_withdrawal_record(&bad_utf8)
             .unwrap_err()
             .contains("not UTF-8"));
+
+        // A non-tez asset_id roundtrips intact.
+        let fa2_id = hash(b"tzel:asset:KT1Fa2Test");
+        let fa2_record = WithdrawalRecord {
+            asset_id: fa2_id,
+            recipient: sample_l1_receiver().into(),
+            amount: 1,
+        };
+        let fa2_encoded = encode_withdrawal_record(&fa2_record);
+        let fa2_decoded = decode_withdrawal_record(&fa2_encoded).unwrap();
+        assert_eq!(fa2_decoded, fa2_record);
+        assert_eq!(fa2_decoded.asset_id, fa2_id);
     }
 
     #[test]

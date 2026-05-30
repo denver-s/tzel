@@ -70,6 +70,12 @@ pub struct KernelStarkProof {
 /// authorizing this specific draw.
 #[derive(Debug, Clone)]
 pub struct KernelShieldReq {
+    /// L2 asset_id this shield is draining. Mirror of `ShieldReq::asset_id`.
+    /// The kernel-wire encoding gets a tagged-version byte so older
+    /// pre-multiasset messages (which had no asset field) decode to
+    /// ASSET_TEZ — but since the multiasset branch has no production
+    /// users, the canonical encoding from now on includes it.
+    pub asset_id: F,
     pub pubkey_hash: F,
     pub fee: u64,
     pub v: u64,
@@ -227,6 +233,7 @@ struct WireSignedKernelBridgeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, HasEncoding, NomReader, BinWriter)]
 struct WireKernelShieldReq {
+    asset_id: WireFelt,
     pubkey_hash: WireFelt,
     fee: WireU64Le,
     v: WireU64Le,
@@ -556,6 +563,7 @@ pub fn kernel_proof_to_host(proof: &KernelStarkProof) -> Proof {
 
 pub fn kernel_shield_req_to_host(req: &KernelShieldReq) -> ShieldReq {
     ShieldReq {
+        asset_id: req.asset_id,
         pubkey_hash: req.pubkey_hash,
         fee: req.fee,
         v: req.v,
@@ -903,6 +911,7 @@ fn encoded_felt_list_from_wire(wire: WireEncodedFeltList) -> Result<Vec<F>, Stri
 
 fn kernel_shield_req_to_wire(req: &KernelShieldReq) -> Result<WireKernelShieldReq, String> {
     Ok(WireKernelShieldReq {
+        asset_id: felt_to_wire(&req.asset_id),
         pubkey_hash: felt_to_wire(&req.pubkey_hash),
         fee: u64_to_wire(req.fee),
         v: u64_to_wire(req.v),
@@ -917,6 +926,7 @@ fn kernel_shield_req_to_wire(req: &KernelShieldReq) -> Result<WireKernelShieldRe
 
 fn kernel_shield_req_from_wire(wire: WireKernelShieldReq) -> Result<KernelShieldReq, String> {
     Ok(KernelShieldReq {
+        asset_id: wire_to_felt(wire.asset_id)?,
         pubkey_hash: wire_to_felt(wire.pubkey_hash)?,
         fee: wire_to_u64(wire.fee)?,
         v: wire_to_u64(wire.v)?,
@@ -1174,7 +1184,7 @@ fn unshield_resp_from_wire(wire: WireUnshieldResp) -> Result<UnshieldResp, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DETECT_K, ZERO};
+    use crate::{ASSET_TEZ, DETECT_K, ZERO};
     use proptest::prelude::*;
 
     fn small_string(max_len: usize) -> impl Strategy<Value = String> {
@@ -1239,6 +1249,7 @@ mod tests {
         let pubkey_hash = [0x42; 32];
         let client_cm = [0x55; 32];
         let message = KernelInboxMessage::Shield(KernelShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             fee: 3,
             v: 42,
@@ -1334,6 +1345,7 @@ mod tests {
             output_preimage: vec![[0x11; 32], [0x22; 32], [0x33; 32], [0x44; 32], [0x55; 32]],
         };
         let message = KernelInboxMessage::Shield(KernelShieldReq {
+            asset_id: ASSET_TEZ,
             pubkey_hash: [0x42; 32],
             fee: 2,
             v: 7,
@@ -1655,6 +1667,7 @@ mod tests {
             producer_enc in arb_encrypted_note(),
         ) {
             let message = KernelInboxMessage::Shield(KernelShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v,
@@ -1926,6 +1939,7 @@ mod tests {
             producer_enc in arb_encrypted_note(),
         ) {
             let shield = KernelShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 fee,
                 v: value,

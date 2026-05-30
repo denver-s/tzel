@@ -543,6 +543,7 @@ mod tests {
             .unwrap();
         ledger
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash,
                 v,
                 fee: TEST_FEE,
@@ -1749,6 +1750,7 @@ mod tests {
 
         let err = ledger
             .shield(&ShieldReq {
+                asset_id: ASSET_TEZ,
                 pubkey_hash: test_pubkey_hash("alice"),
                 v: 100,
                 fee: TEST_FEE,
@@ -2701,6 +2703,7 @@ exit 2
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 1,
             }]
@@ -2745,6 +2748,7 @@ exit 2
         assert_eq!(
             ledger.withdrawals,
             vec![WithdrawalRecord {
+                asset_id: ASSET_TEZ,
                 recipient: TEST_L1_RECIPIENT.into(),
                 amount: 1,
             }]

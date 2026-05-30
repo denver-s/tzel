@@ -2910,6 +2910,7 @@ fn host_stark_proof_to_kernel(proof: &Proof) -> Result<KernelStarkProof, String>
 
 fn shield_req_to_kernel(req: &ShieldReq) -> Result<KernelShieldReq, String> {
     Ok(KernelShieldReq {
+        asset_id: req.asset_id,
         pubkey_hash: req.pubkey_hash,
         fee: req.fee,
         producer_fee: req.producer_fee,
@@ -8802,6 +8803,9 @@ fn cmd_shield_rollup(
 
     save_wallet(path, &w)?;
     let req = ShieldReq {
+        // v1 single-bridge: wallet shield always drains the tez pool.
+        // E.6 will let the user supply --asset to target an FA2 pool.
+        asset_id: ASSET_TEZ,
         pubkey_hash,
         fee,
         v: amount,
