@@ -22,11 +22,62 @@ pub type F = [u8; 32];
 pub const ZERO: F = [0u8; 32];
 
 /// Canonical tez asset tag. The multiasset commitment scheme binds an
-/// asset field inside every note commitment; `0` is reserved for tez,
-/// other felts are future bridge-defined tags. In v1 only the tez
-/// bridge is deployed, so every commitment built by the wallet uses
-/// this constant.
+/// asset field inside every note commitment. `ASSET_TEZ` is reserved
+/// for tez (felt 0) — every commitment built against the tez bridge
+/// uses this constant. Non-tez assets are FA2 tokens reached through
+/// per-asset L1 ticketer contracts; their `asset_id` is derived from
+/// the ticketer's L1 address via `derive_asset_id` so an L2 commitment
+/// transparently identifies which L1 contract may release the
+/// underlying token on exit. The kernel's bridge config carries an
+/// explicit `Vec<AssetEntry>` registry — only entries in that list are
+/// accepted for shield (deposit) and unshield (exit). Producer fees
+/// stay tez permanently (liquidity argument for DAL inclusion).
 pub const ASSET_TEZ: F = ZERO;
+
+/// Domain-separated derivation of an L2 asset_id from its L1 ticketer
+/// contract address. Using a hash of the ticketer means two FA2
+/// tokens served by different ticketers cannot collide on asset_id,
+/// and the L1 → L2 binding is structural rather than registered. The
+/// tez bridge keeps `asset_id = ASSET_TEZ` (ZERO) for backward
+/// compatibility with everywhere ZERO is treated as "tez" in commits
+/// and the 2-accumulator constraint.
+pub fn derive_asset_id(ticketer: &str) -> F {
+    let mut buf = Vec::with_capacity(11 + ticketer.len());
+    buf.extend_from_slice(b"tzel:asset:");
+    buf.extend_from_slice(ticketer.as_bytes());
+    hash(&buf)
+}
+
+/// One registered bridge endpoint. The kernel's `BridgeConfig` carries
+/// a `Vec<AssetEntry>` and refuses to credit deposits or release
+/// withdrawals for any asset not in the list. Entry 0 is conventionally
+/// the tez bridge (`asset_id = ASSET_TEZ`); subsequent entries are FA2
+/// bridges with `asset_id = derive_asset_id(ticketer)`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetEntry {
+    /// L2 asset identity carried in commitments and sighashes.
+    pub asset_id: F,
+    /// L1 contract address of the ticketer that mints/burns this asset's
+    /// tickets. Both deposits (mint) and exits (burn) route through it.
+    pub ticketer: String,
+}
+
+impl AssetEntry {
+    /// The canonical tez entry for index 0 of any bridge config.
+    /// asset_id is fixed at ASSET_TEZ regardless of the ticketer
+    /// address, because every pre-multiasset commitment in the system
+    /// hardcodes ZERO for tez.
+    pub fn tez(ticketer: String) -> Self {
+        Self { asset_id: ASSET_TEZ, ticketer }
+    }
+
+    /// An FA2 entry whose asset_id is derived from its ticketer
+    /// address (one ticketer = one asset).
+    pub fn fa2(ticketer: String) -> Self {
+        let asset_id = derive_asset_id(&ticketer);
+        Self { asset_id, ticketer }
+    }
+}
 pub const DETECT_K: usize = 10;
 pub const ML_KEM768_CIPHERTEXT_BYTES: usize = 1088;
 pub const NOTE_AEAD_NONCE_BYTES: usize = 12;
@@ -5984,6 +6035,31 @@ mod tests {
             err.contains("asset_pub") || err.contains("v1") || err.contains("tez"),
             "rejection should mention asset_pub/v1/tez, got: {err}",
         );
+    }
+
+    /// AssetEntry::tez is always asset_id = ASSET_TEZ regardless of the
+    /// ticketer string supplied. This preserves the property that every
+    /// pre-multiasset commitment (which hardcoded asset = ZERO for tez)
+    /// continues to match the registered tez bridge after the registry
+    /// is populated.
+    #[test]
+    fn test_asset_entry_tez_fixes_asset_id_to_zero() {
+        let entry = AssetEntry::tez("KT1Tezzz".into());
+        assert_eq!(entry.asset_id, ASSET_TEZ);
+        assert_eq!(entry.asset_id, ZERO);
+        assert_eq!(entry.ticketer, "KT1Tezzz");
+    }
+
+    /// AssetEntry::fa2 derives asset_id from the ticketer address —
+    /// different ticketer addresses produce different asset_ids
+    /// (one-ticketer-per-asset is structural, not registered).
+    #[test]
+    fn test_asset_entry_fa2_distinct_per_ticketer() {
+        let a = AssetEntry::fa2("KT1AAA".into());
+        let b = AssetEntry::fa2("KT1BBB".into());
+        assert_ne!(a.asset_id, b.asset_id, "two FA2 ticketers must have distinct asset_ids");
+        assert_ne!(a.asset_id, ASSET_TEZ, "FA2 asset_id must not collide with tez");
+        assert_eq!(a.asset_id, derive_asset_id("KT1AAA"));
     }
 
     /// `apply_transfer` does not constrain asset values directly; the

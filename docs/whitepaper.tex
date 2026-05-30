@@ -673,18 +673,35 @@ asset equals it unless it happens to equal tez, in which case the
 constraints collapse). This delivers the full multiasset model
 without enumerating asset values inside the constraint system.
 
-\subsection{Bridges and v1 limitations}
+\subsection{Bridges and the asset registry}
 
-The v1 protocol deploys only the tez bridge. The shield and unshield
-circuits accept asset tags on every commitment but assert
-\(asset_{new} = ASSET\_TEZ\) (shield) and \(asset_{pub} = ASSET\_TEZ\)
-(unshield) for the L1-touching outputs. The transfer circuit does
-not restrict the primary asset — any non-tez tag is acceptable as
-long as the balance closes — so users can move asset-A notes inside
-the private pool today, anticipating future bridges. When additional
-bridges land, the v1 single-bridge asserts are lifted and replaced
-with per-bridge whitelist checks; no commitment-format change is
-needed.
+Each registered asset has its own L1 ticketer contract. The L2
+asset identity is derived as
+\(asset\_id = H(\text{``tzel:asset:''} \parallel \text{ticketer\_address})\):
+this binds the L2 commitment's asset tag to a specific L1 contract
+without an on-chain registry table. The kernel's bridge config
+carries an explicit \(Vec\langle (asset\_id, ticketer) \rangle\) list;
+deposits whose sender contract is not in the list are rejected, and
+unshields whose \(asset_{pub}\) does not appear in the list are
+rejected. The producer-fee asset stays pinned to tez permanently —
+the liquidity argument (§"Multiasset" fee rationale) is independent
+of which other bridges exist.
+
+The tez bridge keeps \(asset\_id = ASSET\_TEZ = 0\) for backward
+compatibility with every commitment built before multiasset landed.
+FA2 bridges use the derived hash; the asset-id derivation is one-way
+and structural, so any honest L2 observer can reconstruct it from a
+deposited ticket's contract address.
+
+The shield circuit no longer hard-pins \(asset_{new} = ASSET\_TEZ\);
+the kernel checks \(asset_{new} \in \text{registered}\) at apply time.
+Likewise the unshield circuit no longer hard-pins \(asset_{pub}\);
+the kernel validates registry membership and dispatches the L1 burn
+to the matching ticketer. The Cairo circuit retains the
+2-accumulator per-asset balance constraint, and the producer-fee
+pins (\(asset_{4} = ASSET\_TEZ\) in transfer, \(asset_{fee} =
+ASSET\_TEZ\) in unshield, \(asset_{producer} = ASSET\_TEZ\) in
+shield) all remain.
 
 \subsection{Per-asset traffic analysis}
 
