@@ -1345,4 +1345,494 @@ mod tests {
         fixture.input_asset_list = array![0xB];
         run_verify(@fixture);
     }
+
+    // Multiasset Phase B positive coverage. Same reasoning as
+    // transfer.cairo's mixed-asset block: the negative tests above only
+    // confirm rejections; without these positive cases the
+    // 2-accumulator per-asset balance could be silently bypassed and
+    // the suite would still go green.
+    //
+    // Layout: input 0 carries tez (covers fee + producer + tez public
+    // exit + tez change), input 1 carries primary (refunded in
+    // change_1). Public exit is pinned to tez by the v1 single-bridge
+    // constraint so the only legal way to spend primary in an unshield
+    // is via the change slots.
+    fn build_mixed_asset_two_input_fixture(primary: felt252) -> UnshieldFixture {
+        let auth_domain = 0xB101;
+        let auth_pub_seed = 0xB102;
+
+        let auth_idx_0 = 0_u32;
+        let auth_idx_1 = 1_u32;
+        let key_base_0 = 0xB200;
+        let key_base_1 = 0xB300;
+
+        let mut endpoints_0: Array<felt252> = array![];
+        let mut endpoints_1: Array<felt252> = array![];
+        let mut chain_idx: u32 = 0;
+        while chain_idx < xmss_common::WOTS_CHAINS {
+            let start_0 = hash::hash1(chain_idx.into() + key_base_0);
+            let start_1 = hash::hash1(chain_idx.into() + key_base_1);
+            endpoints_0
+                .append(
+                    chain_advance(
+                        start_0, auth_pub_seed, auth_idx_0, chain_idx, xmss_common::WOTS_W - 1,
+                    ),
+                );
+            endpoints_1
+                .append(
+                    chain_advance(
+                        start_1, auth_pub_seed, auth_idx_1, chain_idx, xmss_common::WOTS_W - 1,
+                    ),
+                );
+            chain_idx += 1;
+        }
+
+        let leaf_0 = xmss_common::xmss_ltree(auth_pub_seed, auth_idx_0, endpoints_0.span());
+        let leaf_1 = xmss_common::xmss_ltree(auth_pub_seed, auth_idx_1, endpoints_1.span());
+
+        let mut upper_auth_siblings: Array<felt252> = array![];
+        let mut auth_level: u32 = 1;
+        while auth_level < merkle::AUTH_DEPTH {
+            upper_auth_siblings.append(hash::hash1(auth_level.into() + 0xB400));
+            auth_level += 1;
+        }
+        let mut auth_siblings_0: Array<felt252> = array![leaf_1];
+        let mut auth_siblings_1: Array<felt252> = array![leaf_0];
+        let mut ai: u32 = 0;
+        while ai < upper_auth_siblings.len() {
+            auth_siblings_0.append(*upper_auth_siblings.at(ai));
+            auth_siblings_1.append(*upper_auth_siblings.at(ai));
+            ai += 1;
+        }
+        let auth_root = auth_root_from_leaf(
+            leaf_0, auth_pub_seed, auth_idx_0, auth_siblings_0.span(),
+        );
+
+        let nk_spend_0 = 0xB501;
+        let nk_spend_1 = 0xB502;
+        let d_j_in_0 = 0xB503;
+        let d_j_in_1 = 0xB504;
+        let v_in_0 = 45_u64;
+        let v_in_1 = 35_u64;
+        let rseed_in_0 = 0xB505;
+        let rseed_in_1 = 0xB506;
+
+        // Input 0: tez. Input 1: primary.
+        let rcm_in_0 = hash::derive_rcm(rseed_in_0);
+        let otag_in_0 = hash::owner_tag(
+            auth_root, auth_pub_seed, hash::derive_nk_tag(nk_spend_0),
+        );
+        let cm_0 = hash::commit(d_j_in_0, v_in_0, ASSET_TEZ, rcm_in_0, otag_in_0);
+
+        let rcm_in_1 = hash::derive_rcm(rseed_in_1);
+        let otag_in_1 = hash::owner_tag(
+            auth_root, auth_pub_seed, hash::derive_nk_tag(nk_spend_1),
+        );
+        let cm_1_in = hash::commit(d_j_in_1, v_in_1, primary, rcm_in_1, otag_in_1);
+
+        let mut upper_cm_siblings: Array<felt252> = array![];
+        let mut tree_level: u32 = 1;
+        while tree_level < merkle::TREE_DEPTH {
+            upper_cm_siblings.append(hash::hash1(tree_level.into() + 0xB600));
+            tree_level += 1;
+        }
+        let mut cm_siblings_0: Array<felt252> = array![cm_1_in];
+        let mut cm_siblings_1: Array<felt252> = array![cm_0];
+        let mut cs: u32 = 0;
+        while cs < upper_cm_siblings.len() {
+            cm_siblings_0.append(*upper_cm_siblings.at(cs));
+            cm_siblings_1.append(*upper_cm_siblings.at(cs));
+            cs += 1;
+        }
+
+        let root = merkle_root_from_path(cm_0, cm_siblings_0.span(), 0);
+        let nf_0 = hash::nullifier(nk_spend_0, cm_0, 0);
+        let nf_1 = hash::nullifier(nk_spend_1, cm_1_in, 1);
+
+        // Balance:
+        //   tez_in     = 45
+        //   tez_out    = v_fee (3) + v_pub (10) + v_change_2 (27 tez) = 40
+        //                (change_1 is primary so excluded from tez lane)
+        //   fee        = 5; 45 == 40 + 5 ✓
+        //   primary_in = 35
+        //   primary_out = v_change (35 primary) = 35 ✓
+        let v_pub = 10_u64;
+        let fee = 5_u64;
+        let v_fee = 3_u64;
+        let recipient = 0xB701;
+
+        // change_1: asset = primary, value = 35 (refund of input 1).
+        let has_change = true;
+        let d_j_change = 0xB702;
+        let v_change = 35_u64;
+        let rseed_change = 0xB703;
+        let auth_root_change = 0xB704;
+        let auth_pub_seed_change = 0xB705;
+        let nk_tag_change = 0xB706;
+        let memo_ct_hash_change = 0xB707;
+        let cm_change = change_commitment_or_zero(
+            has_change,
+            d_j_change,
+            v_change,
+            primary,
+            rseed_change,
+            auth_root_change,
+            auth_pub_seed_change,
+            nk_tag_change,
+            memo_ct_hash_change,
+        );
+
+        // change_2: asset = tez, value = 27 (leftover tez after exit + fees).
+        let has_change_2 = true;
+        let d_j_change_2 = 0xB712;
+        let v_change_2 = 27_u64;
+        let rseed_change_2 = 0xB713;
+        let auth_root_change_2 = 0xB714;
+        let auth_pub_seed_change_2 = 0xB715;
+        let nk_tag_change_2 = 0xB716;
+        let memo_ct_hash_change_2 = 0xB717;
+        let cm_change_2 = change_commitment_or_zero(
+            has_change_2,
+            d_j_change_2,
+            v_change_2,
+            ASSET_TEZ,
+            rseed_change_2,
+            auth_root_change_2,
+            auth_pub_seed_change_2,
+            nk_tag_change_2,
+            memo_ct_hash_change_2,
+        );
+
+        let d_j_fee = 0xB722;
+        let rseed_fee = 0xB723;
+        let auth_root_fee = 0xB724;
+        let auth_pub_seed_fee = 0xB725;
+        let nk_tag_fee = 0xB726;
+        let memo_ct_hash_fee = 0xB727;
+        let cm_fee = note_commitment(
+            d_j_fee, v_fee, rseed_fee, auth_root_fee, auth_pub_seed_fee, nk_tag_fee,
+        );
+
+        let nf_list: Array<felt252> = array![nf_0, nf_1];
+        let sighash = unshield_sighash(
+            auth_domain,
+            root,
+            nf_list.span(),
+            v_pub,
+            ASSET_TEZ,
+            fee,
+            recipient,
+            cm_change,
+            memo_ct_hash_change,
+            cm_change_2,
+            memo_ct_hash_change_2,
+            cm_fee,
+            memo_ct_hash_fee,
+        );
+
+        let sig_0 = sign_unshield_input(sighash, auth_pub_seed, auth_idx_0, key_base_0);
+        let sig_1 = sign_unshield_input(sighash, auth_pub_seed, auth_idx_1, key_base_1);
+        let mut wots_sig_flat: Array<felt252> = array![];
+        let mut sk: u32 = 0;
+        while sk < sig_0.len() {
+            wots_sig_flat.append(*sig_0.at(sk));
+            sk += 1;
+        }
+        let mut sl: u32 = 0;
+        while sl < sig_1.len() {
+            wots_sig_flat.append(*sig_1.at(sl));
+            sl += 1;
+        }
+
+        let mut cm_siblings_flat: Array<felt252> = array![];
+        let mut cp: u32 = 0;
+        while cp < cm_siblings_0.len() {
+            cm_siblings_flat.append(*cm_siblings_0.at(cp));
+            cp += 1;
+        }
+        let mut cq: u32 = 0;
+        while cq < cm_siblings_1.len() {
+            cm_siblings_flat.append(*cm_siblings_1.at(cq));
+            cq += 1;
+        }
+
+        let mut auth_siblings_flat: Array<felt252> = array![];
+        let mut ar: u32 = 0;
+        while ar < auth_siblings_0.len() {
+            auth_siblings_flat.append(*auth_siblings_0.at(ar));
+            ar += 1;
+        }
+        let mut at: u32 = 0;
+        while at < auth_siblings_1.len() {
+            auth_siblings_flat.append(*auth_siblings_1.at(at));
+            at += 1;
+        }
+
+        UnshieldFixture {
+            auth_domain,
+            root,
+            nf_list,
+            v_pub,
+            fee,
+            recipient,
+            nk_spend_list: array![nk_spend_0, nk_spend_1],
+            auth_root_list: array![auth_root, auth_root],
+            auth_pub_seed_list: array![auth_pub_seed, auth_pub_seed],
+            wots_sig_flat,
+            auth_siblings_flat,
+            auth_index_list: array![auth_idx_0, auth_idx_1],
+            d_j_in_list: array![d_j_in_0, d_j_in_1],
+            v_in_list: array![v_in_0, v_in_1],
+            rseed_in_list: array![rseed_in_0, rseed_in_1],
+            cm_siblings_flat,
+            cm_path_indices_list: array![0_u64, 1_u64],
+            has_change,
+            d_j_change,
+            v_change,
+            rseed_change,
+            auth_root_change,
+            auth_pub_seed_change,
+            nk_tag_change,
+            memo_ct_hash_change,
+            d_j_fee,
+            v_fee,
+            rseed_fee,
+            auth_root_fee,
+            auth_pub_seed_fee,
+            nk_tag_fee,
+            memo_ct_hash_fee,
+            has_change_2,
+            d_j_change_2,
+            v_change_2,
+            rseed_change_2,
+            auth_root_change_2,
+            auth_pub_seed_change_2,
+            nk_tag_change_2,
+            memo_ct_hash_change_2,
+            input_asset_list: array![ASSET_TEZ, primary],
+            asset_change: primary,
+            asset_change_2: ASSET_TEZ,
+            asset_fee: ASSET_TEZ,
+            asset_pub: ASSET_TEZ,
+            primary_non_tez_asset: primary,
+        }
+    }
+
+    /// Positive: mixed-asset unshield. Primary refunded via change_1,
+    /// tez leftover via change_2, asset_pub pinned to tez. Both
+    /// accumulators carry non-zero balances.
+    #[test]
+    fn test_unshield_accepts_mixed_assets_primary_refund_via_change_1() {
+        let primary = 0xFA2F0001;
+        let fixture = build_mixed_asset_two_input_fixture(primary);
+        let outputs = run_verify(@fixture);
+        // Public output layout: auth_domain, root, nf_0, nf_1, v_pub,
+        // asset_pub, fee, recipient, cm_change, mh_change,
+        // cm_change_2, mh_change_2, cm_fee, mh_fee → 14 entries for n=2.
+        assert(outputs.len() == 14, 'unshield mixed outputs len');
+        assert(*outputs.at(5) == fixture.asset_pub, 'unshield mixed out asset_pub');
+        assert(*outputs.at(4) == fixture.v_pub.into(), 'unshield mixed out v_pub');
+    }
+
+    /// Positive: swap which change slot carries the primary refund.
+    /// change_1 becomes tez and change_2 becomes primary. The
+    /// 2-accumulator constraint should accept the mirrored layout.
+    #[test]
+    fn test_unshield_accepts_primary_refund_via_change_2() {
+        let primary = 0xFA2F0002;
+        let mut fixture = build_mixed_asset_two_input_fixture(primary);
+        // Swap the asset+value of the two change slots, then rebuild
+        // both commitments and re-sign.
+        let v_c1 = fixture.v_change;
+        let v_c2 = fixture.v_change_2;
+        fixture.v_change = v_c2;
+        fixture.v_change_2 = v_c1;
+        fixture.asset_change = ASSET_TEZ;
+        fixture.asset_change_2 = primary;
+
+        let new_cm_change = change_commitment_or_zero(
+            fixture.has_change,
+            fixture.d_j_change,
+            fixture.v_change,
+            fixture.asset_change,
+            fixture.rseed_change,
+            fixture.auth_root_change,
+            fixture.auth_pub_seed_change,
+            fixture.nk_tag_change,
+            fixture.memo_ct_hash_change,
+        );
+        let new_cm_change_2 = change_commitment_or_zero(
+            fixture.has_change_2,
+            fixture.d_j_change_2,
+            fixture.v_change_2,
+            fixture.asset_change_2,
+            fixture.rseed_change_2,
+            fixture.auth_root_change_2,
+            fixture.auth_pub_seed_change_2,
+            fixture.nk_tag_change_2,
+            fixture.memo_ct_hash_change_2,
+        );
+        let cm_fee = note_commitment(
+            fixture.d_j_fee,
+            fixture.v_fee,
+            fixture.rseed_fee,
+            fixture.auth_root_fee,
+            fixture.auth_pub_seed_fee,
+            fixture.nk_tag_fee,
+        );
+        let new_sighash = unshield_sighash(
+            fixture.auth_domain,
+            fixture.root,
+            fixture.nf_list.span(),
+            fixture.v_pub,
+            fixture.asset_pub,
+            fixture.fee,
+            fixture.recipient,
+            new_cm_change,
+            fixture.memo_ct_hash_change,
+            new_cm_change_2,
+            fixture.memo_ct_hash_change_2,
+            cm_fee,
+            fixture.memo_ct_hash_fee,
+        );
+        let sig_0 = sign_unshield_input(new_sighash, 0xB102, 0_u32, 0xB200);
+        let sig_1 = sign_unshield_input(new_sighash, 0xB102, 1_u32, 0xB300);
+        let mut wots_sig_flat: Array<felt252> = array![];
+        let mut sk: u32 = 0;
+        while sk < sig_0.len() {
+            wots_sig_flat.append(*sig_0.at(sk));
+            sk += 1;
+        }
+        let mut sl: u32 = 0;
+        while sl < sig_1.len() {
+            wots_sig_flat.append(*sig_1.at(sl));
+            sl += 1;
+        }
+        fixture.wots_sig_flat = wots_sig_flat;
+        run_verify(@fixture);
+    }
+
+    /// Positive: degenerate case where primary_non_tez_asset ==
+    /// ASSET_TEZ. The two accumulators merge into the single tez lane.
+    /// Same regime the pure-tez tests already cover, asserted here
+    /// explicitly so a refactor cannot silently disable the
+    /// `primary_in == primary_out` check by short-circuiting when the
+    /// two assets are equal.
+    #[test]
+    fn test_unshield_accepts_degenerate_primary_equals_tez() {
+        let fixture = build_two_input_fixture();
+        let _outputs = run_verify(@fixture);
+    }
+
+    /// Positive: primary_non_tez_asset is non-tez but no input or
+    /// output uses it. Both primary accumulators stay at zero and the
+    /// proof verifies. Guards against a regression that would require
+    /// primary_in or primary_out to be strictly positive once primary
+    /// differs from tez.
+    #[test]
+    fn test_unshield_accepts_unused_primary_asset() {
+        let mut fixture = build_two_input_fixture();
+        fixture.primary_non_tez_asset = 0xFEEDFACE;
+        run_verify(@fixture);
+    }
+
+    /// Negative: flip change_1's asset tag to tez without recomputing
+    /// the commitment (cm_change was committed to primary). The
+    /// change_commitment_or_zero recompute uses fixture.asset_change so
+    /// the cm we recompute won't match what the sighash bound. The
+    /// fastest-firing check is the WOTS signature recovery (sighash
+    /// changes, recovered key won't match the leaf).
+    #[test]
+    #[should_panic(expected: ('xmss auth root mismatch',))]
+    fn test_unshield_rejects_change_1_asset_flipped() {
+        let primary = 0xFA2F0003;
+        let mut fixture = build_mixed_asset_two_input_fixture(primary);
+        fixture.asset_change = ASSET_TEZ;
+        run_verify(@fixture);
+    }
+
+    /// Negative: flip the input asset tag at position 1 from primary
+    /// to tez. The per-input loop recomputes commit(d_j, v, tez, …)
+    /// which won't match the committed leaf in the cm-tree.
+    #[test]
+    #[should_panic(expected: ('merkle root mismatch',))]
+    fn test_unshield_rejects_input_asset_tag_flipped() {
+        let primary = 0xFA2F0004;
+        let mut fixture = build_mixed_asset_two_input_fixture(primary);
+        fixture.input_asset_list = array![ASSET_TEZ, ASSET_TEZ];
+        run_verify(@fixture);
+    }
+
+    /// Negative: drop the public exit to 0 and keep the rest. The tez
+    /// lane now has 45 in vs 40 - 10 + 0 = 30 out + 5 fee → 35.
+    /// 45 ≠ 35 so the tez balance constraint fires.
+    #[test]
+    #[should_panic(expected: ('unshield: tez balance',))]
+    fn test_unshield_rejects_silent_v_pub_drop() {
+        let primary = 0xFA2F0005;
+        let mut fixture = build_mixed_asset_two_input_fixture(primary);
+        fixture.v_pub = 0_u64;
+        // Re-sign so the WOTS check passes and we hit the balance
+        // assertion specifically.
+        let cm_change = change_commitment_or_zero(
+            fixture.has_change,
+            fixture.d_j_change,
+            fixture.v_change,
+            fixture.asset_change,
+            fixture.rseed_change,
+            fixture.auth_root_change,
+            fixture.auth_pub_seed_change,
+            fixture.nk_tag_change,
+            fixture.memo_ct_hash_change,
+        );
+        let cm_change_2 = change_commitment_or_zero(
+            fixture.has_change_2,
+            fixture.d_j_change_2,
+            fixture.v_change_2,
+            fixture.asset_change_2,
+            fixture.rseed_change_2,
+            fixture.auth_root_change_2,
+            fixture.auth_pub_seed_change_2,
+            fixture.nk_tag_change_2,
+            fixture.memo_ct_hash_change_2,
+        );
+        let cm_fee = note_commitment(
+            fixture.d_j_fee,
+            fixture.v_fee,
+            fixture.rseed_fee,
+            fixture.auth_root_fee,
+            fixture.auth_pub_seed_fee,
+            fixture.nk_tag_fee,
+        );
+        let new_sighash = unshield_sighash(
+            fixture.auth_domain,
+            fixture.root,
+            fixture.nf_list.span(),
+            fixture.v_pub,
+            fixture.asset_pub,
+            fixture.fee,
+            fixture.recipient,
+            cm_change,
+            fixture.memo_ct_hash_change,
+            cm_change_2,
+            fixture.memo_ct_hash_change_2,
+            cm_fee,
+            fixture.memo_ct_hash_fee,
+        );
+        let sig_0 = sign_unshield_input(new_sighash, 0xB102, 0_u32, 0xB200);
+        let sig_1 = sign_unshield_input(new_sighash, 0xB102, 1_u32, 0xB300);
+        let mut wots_sig_flat: Array<felt252> = array![];
+        let mut sk: u32 = 0;
+        while sk < sig_0.len() {
+            wots_sig_flat.append(*sig_0.at(sk));
+            sk += 1;
+        }
+        let mut sl: u32 = 0;
+        while sl < sig_1.len() {
+            wots_sig_flat.append(*sig_1.at(sl));
+            sl += 1;
+        }
+        fixture.wots_sig_flat = wots_sig_flat;
+        run_verify(@fixture);
+    }
 }

@@ -5795,4 +5795,257 @@ mod tests {
         assert_eq!(ledger.root_history.len(), 3);
         assert_eq!(ledger.valid_roots.len(), 3);
     }
+
+    // ─── Multiasset Phase B positive coverage ────────────────────────
+    //
+    // The Cairo unit tests fully exercise per-asset balance behaviour;
+    // these tests cover the Rust-side primitives (commitment hash,
+    // sighash binding, kernel asset_pub pin) so a regression that bypasses
+    // the asset field in any Rust sighash/commit helper is caught here
+    // independent of the Cairo verifier.
+
+    /// `commit` must include the asset in its preimage. Two commitments
+    /// with identical (d_j, value, rcm, otag) but different assets
+    /// must differ — otherwise an attacker could swap the asset tag of
+    /// a note without invalidating its commitment.
+    #[test]
+    fn test_commit_distinguishes_assets_in_preimage() {
+        let d_j = u(0x1234);
+        let v = 12345u64;
+        let rcm = u(0xAAAA);
+        let otag = u(0xBBBB);
+        let primary = u(0xCAFE);
+
+        let cm_tez = commit(&d_j, v, &ASSET_TEZ, &rcm, &otag);
+        let cm_primary = commit(&d_j, v, &primary, &rcm, &otag);
+
+        assert_ne!(
+            cm_tez, cm_primary,
+            "commit() must domain-separate by asset; otherwise an attacker can flip a note's asset class without changing its commitment"
+        );
+    }
+
+    /// `transfer_sighash` binds output assets indirectly through cm_i
+    /// (each cm = commit(d_j, v, asset, rcm, otag)). Swap one
+    /// output's asset and the cm — and therefore the sighash — must
+    /// change. Without this, a relayer could substitute a primary
+    /// output for a tez output post-signing.
+    #[test]
+    fn test_transfer_sighash_changes_when_output_asset_flips() {
+        let auth_domain = u(0xD000);
+        let root = u(0xD001);
+        let nf = u(0xD002);
+        let fee = MIN_TX_FEE;
+        let d_j = u(0xD100);
+        let v = 5_000u64;
+        let rcm = u(0xD101);
+        let otag = u(0xD102);
+        let mh = u(0xD200);
+        let primary = u(0xFA2);
+
+        let cm_tez = commit(&d_j, v, &ASSET_TEZ, &rcm, &otag);
+        let cm_primary = commit(&d_j, v, &primary, &rcm, &otag);
+
+        let sh_tez =
+            transfer_sighash(&auth_domain, &root, &[nf], fee, &cm_tez, &cm_tez, &cm_tez, &cm_tez,
+                             &mh, &mh, &mh, &mh);
+        let sh_primary = transfer_sighash(
+            &auth_domain, &root, &[nf], fee, &cm_primary, &cm_tez, &cm_tez, &cm_tez,
+            &mh, &mh, &mh, &mh,
+        );
+        assert_ne!(sh_tez, sh_primary, "sighash must change when an output's asset flips");
+    }
+
+    /// `unshield_sighash` takes `asset_pub` as an explicit argument
+    /// (the L1 exit asset). Changing it must change the sighash —
+    /// even though the v1 verifier pins it to ASSET_TEZ, the binding
+    /// has to be there in case the pin is relaxed in a future
+    /// version. Without this binding a relayer could change which
+    /// asset the L1 bridge releases.
+    #[test]
+    fn test_unshield_sighash_binds_asset_pub() {
+        let auth_domain = u(0xE000);
+        let root = u(0xE001);
+        let nf = u(0xE002);
+        let v_pub = 1000u64;
+        let fee = MIN_TX_FEE;
+        let recipient = hash(b"some-l1");
+        let cm_change = u(0xE100);
+        let mh_change = u(0xE101);
+        let cm_change_2 = ZERO;
+        let mh_change_2 = ZERO;
+        let cm_fee = u(0xE200);
+        let mh_fee = u(0xE201);
+
+        let primary = u(0xFA2);
+
+        let sh_tez = unshield_sighash(
+            &auth_domain, &root, &[nf], v_pub, &ASSET_TEZ, fee, &recipient,
+            &cm_change, &mh_change, &cm_change_2, &mh_change_2, &cm_fee, &mh_fee,
+        );
+        let sh_primary = unshield_sighash(
+            &auth_domain, &root, &[nf], v_pub, &primary, fee, &recipient,
+            &cm_change, &mh_change, &cm_change_2, &mh_change_2, &cm_fee, &mh_fee,
+        );
+        assert_ne!(sh_tez, sh_primary, "sighash must change when asset_pub flips");
+    }
+
+    /// `unshield_sighash` binds the change commitments. Since cm
+    /// itself includes the asset (see test_commit_distinguishes_assets),
+    /// flipping a change slot's asset (and therefore its cm) must
+    /// change the sighash. This is the indirect binding that lets us
+    /// route the primary asset through change_1 or change_2 without a
+    /// dedicated asset_change argument.
+    #[test]
+    fn test_unshield_sighash_binds_change_asset_via_commitment() {
+        let auth_domain = u(0xE300);
+        let root = u(0xE301);
+        let nf = u(0xE302);
+        let v_pub = 0u64;
+        let fee = MIN_TX_FEE;
+        let recipient = hash(b"other-l1");
+        let d_j_c = u(0xE400);
+        let v_c = 7u64;
+        let rcm_c = u(0xE401);
+        let otag_c = u(0xE402);
+        let mh_c = u(0xE403);
+        let cm_change_2 = ZERO;
+        let mh_change_2 = ZERO;
+        let cm_fee = u(0xE500);
+        let mh_fee = u(0xE501);
+        let primary = u(0xFA2);
+
+        let cm_change_tez = commit(&d_j_c, v_c, &ASSET_TEZ, &rcm_c, &otag_c);
+        let cm_change_primary = commit(&d_j_c, v_c, &primary, &rcm_c, &otag_c);
+
+        let sh_tez_change = unshield_sighash(
+            &auth_domain, &root, &[nf], v_pub, &ASSET_TEZ, fee, &recipient,
+            &cm_change_tez, &mh_c, &cm_change_2, &mh_change_2, &cm_fee, &mh_fee,
+        );
+        let sh_primary_change = unshield_sighash(
+            &auth_domain, &root, &[nf], v_pub, &ASSET_TEZ, fee, &recipient,
+            &cm_change_primary, &mh_c, &cm_change_2, &mh_change_2, &cm_fee, &mh_fee,
+        );
+        assert_ne!(
+            sh_tez_change, sh_primary_change,
+            "sighash must change when change_1's asset flips (via cm_change)"
+        );
+    }
+
+    /// `apply_unshield`'s v1 single-bridge pin: even if the prover
+    /// emits a non-tez asset_pub in the public outputs and signs over
+    /// it, the kernel must refuse. Today this is the canonical "v1
+    /// requires tez" rejection path.
+    #[test]
+    fn test_apply_unshield_rejects_non_tez_asset_pub_in_v1() {
+        let (mut ledger, addr, nk_spend, shield_resp) =
+            shielded_note_setup(0xC0, "alice", 180_000);
+        let root = ledger.tree.root();
+        let auth_domain = ledger.auth_domain;
+        let nf = nullifier(&nk_spend, &shield_resp.cm, shield_resp.index as u64);
+        let (enc_change, cm_change) = deterministic_note(&addr, 30, u(0xA1), Some(b"change"));
+        let (enc_fee, cm_fee) = deterministic_note(&addr, 29_970, u(0xA2), Some(b"dal"));
+        let primary = u(0xFA2);
+
+        let result = apply_unshield(
+            &mut ledger,
+            &UnshieldReq {
+                root,
+                nullifiers: vec![nf],
+                v_pub: 50,
+                fee: MIN_TX_FEE,
+                recipient: TEST_L1_RECIPIENT.into(),
+                cm_change,
+                enc_change: Some(enc_change.clone()),
+                cm_change_2: ZERO,
+                enc_change_2: None,
+                cm_fee,
+                enc_fee: enc_fee.clone(),
+                proof: fake_stark(vec![
+                    auth_domain,
+                    root,
+                    nf,
+                    u(50),
+                    primary, // non-tez asset_pub — v1 must reject
+                    u(MIN_TX_FEE),
+                    hash(TEST_L1_RECIPIENT.as_bytes()),
+                    cm_change,
+                    memo_ct_hash(&enc_change),
+                    ZERO,
+                    ZERO,
+                    cm_fee,
+                    memo_ct_hash(&enc_fee),
+                ]),
+            },
+        );
+
+        let err = result.expect_err("apply_unshield must reject non-tez asset_pub in v1");
+        assert!(
+            err.contains("asset_pub") || err.contains("v1") || err.contains("tez"),
+            "rejection should mention asset_pub/v1/tez, got: {err}",
+        );
+    }
+
+    /// `apply_transfer` does not constrain asset values directly; the
+    /// asset is bound only through the cm_i public outputs. Confirm
+    /// the kernel happily accepts a transfer whose recipient cm was
+    /// computed against a non-tez asset, as long as the proof outputs
+    /// match. The Cairo verifier (not the kernel) is the layer that
+    /// enforces per-asset balance.
+    #[test]
+    fn test_apply_transfer_accepts_non_tez_recipient_cm() {
+        let (mut ledger, addr, nk_spend, shield_resp) =
+            shielded_note_setup(0xC1, "alice", 250_000);
+        let root = ledger.tree.root();
+        let auth_domain = ledger.auth_domain;
+        let nf = nullifier(&nk_spend, &shield_resp.cm, shield_resp.index as u64);
+        let primary = u(0xFA2);
+
+        // Build a recipient commitment that's tagged with the primary
+        // asset. Other slots stay tez-tagged (zero-value placeholders +
+        // producer fee).
+        let (enc_1, _cm_tez_placeholder) =
+            deterministic_note(&addr, 60_000, u(0xB1), Some(b"primary-out"));
+        let rcm_1 = derive_rcm(&u(0xB1));
+        let otag_1 = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &addr.nk_tag);
+        let cm_1 = commit(&addr.d_j, 60_000, &primary, &rcm_1, &otag_1);
+        let (enc_2, cm_2) = deterministic_note(&addr, 70_000, u(0xB2), Some(b"out-2"));
+        let (enc_3, cm_3) = deterministic_note(&addr, 0, u(0xB3), None);
+        let (enc_4, cm_4) = deterministic_note(&addr, 20_000, u(0xB4), Some(b"dal"));
+
+        let resp = apply_transfer(
+            &mut ledger,
+            &TransferReq {
+                root,
+                nullifiers: vec![nf],
+                fee: MIN_TX_FEE,
+                cm_1,
+                cm_2,
+                cm_3,
+                cm_4,
+                enc_1: enc_1.clone(),
+                enc_2: enc_2.clone(),
+                enc_3: enc_3.clone(),
+                enc_4: enc_4.clone(),
+                proof: fake_stark(vec![
+                    auth_domain,
+                    root,
+                    nf,
+                    u(MIN_TX_FEE),
+                    cm_1,
+                    cm_2,
+                    cm_3,
+                    cm_4,
+                    memo_ct_hash(&enc_1),
+                    memo_ct_hash(&enc_2),
+                    memo_ct_hash(&enc_3),
+                    memo_ct_hash(&enc_4),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert!(ledger.nullifiers.contains(&nf));
+        assert_eq!(resp.index_1, 2);
+    }
 }
