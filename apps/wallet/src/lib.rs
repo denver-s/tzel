@@ -2200,7 +2200,12 @@ impl<'a> RollupRpc<'a> {
             if !seen.insert(p.pubkey_hash) {
                 continue;
             }
-            if let Some(balance) = self.try_read_deposit_balance(&head, &p.pubkey_hash)? {
+            // E.6: poll the tez pool for now — the wallet's pending
+            // deposit tracker doesn't carry an asset_id yet. When the
+            // wallet starts emitting FA2 deposits, this needs to scan
+            // each (asset_id, pubkey_hash) pair the user might have
+            // funded.
+            if let Some(balance) = self.try_read_deposit_balance(&head, &ASSET_TEZ, &p.pubkey_hash)? {
                 map.insert(p.pubkey_hash, balance);
             }
         }
@@ -2213,9 +2218,15 @@ impl<'a> RollupRpc<'a> {
     fn try_read_deposit_balance(
         &self,
         block_ref: &str,
+        asset_id: &F,
         pubkey_hash: &F,
     ) -> Result<Option<u64>, String> {
-        let key = format!("{}{}", DURABLE_DEPOSIT_BALANCE_PREFIX, hex::encode(pubkey_hash));
+        let key = format!(
+            "{}{}/{}",
+            DURABLE_DEPOSIT_BALANCE_PREFIX,
+            hex::encode(asset_id),
+            hex::encode(pubkey_hash),
+        );
         match self.read_durable_length_at_block(block_ref, &key)? {
             None => Ok(None),
             Some(0) => Ok(None),
@@ -2826,6 +2837,7 @@ fn outgoing_recovery_plaintext(
 fn build_output_note_inner(
     address: &PaymentAddress,
     value: u64,
+    asset_id: &F,
     memo: Option<&[u8]>,
     outgoing: Option<(&F, OutgoingNoteRole)>,
 ) -> Result<PreparedOutputNote, String> {
@@ -2840,7 +2852,7 @@ fn build_output_note_inner(
     )
     .map_err(|_| "invalid ek_d")?;
     let otag = owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag);
-    let cm = commit(&address.d_j, value, &ASSET_TEZ, &rcm, &otag);
+    let cm = commit(&address.d_j, value, asset_id, &rcm, &otag);
     let mut enc = encrypt_note(value, &rseed, memo, &ek_v, &ek_d);
     if let Some((outgoing_seed, role)) = outgoing {
         let recovery = outgoing_recovery_plaintext(address, role, value, rseed);
@@ -2857,7 +2869,21 @@ fn build_output_note_with_outgoing(
     outgoing_seed: &F,
     role: OutgoingNoteRole,
 ) -> Result<PreparedOutputNote, String> {
-    build_output_note_inner(address, value, memo, Some((outgoing_seed, role)))
+    // Backwards-compatible v1 wrapper: tez asset. Multi-asset callers
+    // (shield, eventually transfer/unshield) use
+    // `build_output_note_with_outgoing_asset`.
+    build_output_note_inner(address, value, &ASSET_TEZ, memo, Some((outgoing_seed, role)))
+}
+
+fn build_output_note_with_outgoing_asset(
+    address: &PaymentAddress,
+    value: u64,
+    asset_id: &F,
+    memo: Option<&[u8]>,
+    outgoing_seed: &F,
+    role: OutgoingNoteRole,
+) -> Result<PreparedOutputNote, String> {
+    build_output_note_inner(address, value, asset_id, memo, Some((outgoing_seed, role)))
 }
 
 fn extract_operation_hash(output: &str) -> Option<String> {
@@ -3468,6 +3494,11 @@ enum UserCmd {
         /// `amount + required_tx_fee + producer_fee`.
         #[arg(long)]
         amount: Option<u64>,
+        /// Asset to shield. Defaults to tez (asset_id = 0). Pass a hex
+        /// asset_id (e.g. derived from an L1 FA2 ticketer address via
+        /// `tzel_core::derive_asset_id`) to drain an FA2 pool instead.
+        #[arg(long)]
+        asset: Option<String>,
     },
     /// Send shielded funds to another payment address.
     Send {
@@ -3784,9 +3815,14 @@ fn run_user(cli: UserCli) -> Result<(), String> {
         UserCmd::Shield {
             pubkey_hash,
             amount,
+            asset,
         } => {
             let profile = load_required_network_profile(&cli.wallet)?;
-            cmd_shield_rollup(&cli.wallet, &profile, &pubkey_hash, amount, &pc)
+            let asset_id = match asset {
+                None => ASSET_TEZ,
+                Some(ref hex) => parse_asset_id_hex(hex)?,
+            };
+            cmd_shield_rollup(&cli.wallet, &profile, &pubkey_hash, amount, asset_id, &pc)
         }
         UserCmd::Send {
             to,
@@ -4012,6 +4048,37 @@ fn parse_pubkey_hash_hex(value: &str) -> Result<F, String> {
 
 fn pubkey_hash_hex(pubkey_hash: &F) -> String {
     hex::encode(pubkey_hash)
+}
+
+/// Parse a CLI-supplied asset_id. Accepts the canonical lowercase
+/// 64-char hex with optional `0x` prefix, OR the literal "tez" /
+/// "0" / "" as syntactic sugar for ASSET_TEZ. The asset_id is just a
+/// felt252 (32 bytes), so the parsing rules mirror `parse_pubkey_hash_hex`
+/// with a couple of friendly shorthands at the front.
+fn parse_asset_id_hex(value: &str) -> Result<F, String> {
+    let stripped = value.trim();
+    if stripped.is_empty() || stripped.eq_ignore_ascii_case("tez") || stripped == "0" {
+        return Ok(ASSET_TEZ);
+    }
+    let body = stripped
+        .strip_prefix("0x")
+        .or_else(|| stripped.strip_prefix("0X"))
+        .unwrap_or(stripped);
+    if body.len() > 64 {
+        return Err(format!(
+            "asset_id must be at most 64 hex chars; got {}",
+            body.len()
+        ));
+    }
+    let padded = format!("{:0>64}", body);
+    if padded.chars().any(|c| !matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F')) {
+        return Err("asset_id must be hex (0-9, a-f) only".into());
+    }
+    let bytes =
+        hex::decode(&padded).map_err(|e| format!("invalid asset_id hex: {}", e))?;
+    let mut out = ZERO;
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 /// Call the reprover to generate a ZK proof.
@@ -7857,7 +7924,11 @@ fn cmd_recover_deposits(
             if known_pubkey_hashes.contains(&pubkey_hash) {
                 continue;
             }
-            let balance = rollup.try_read_deposit_balance(&head_hash, &pubkey_hash)?;
+            // E.6: deposit recovery currently scans the tez pool only.
+            // FA2 recovery will require iterating known asset_ids;
+            // tracked as a wallet-side TODO once a real FA2 ticketer
+            // is deployed (see fa2_bridge_ticketer.tz).
+            let balance = rollup.try_read_deposit_balance(&head_hash, &ASSET_TEZ, &pubkey_hash)?;
             let Some(amount) = balance else { continue };
             if amount == 0 {
                 continue;
@@ -8611,6 +8682,7 @@ fn cmd_shield_rollup(
     profile: &WalletNetworkProfile,
     pubkey_hash_arg: &str,
     amount_arg: Option<u64>,
+    asset_id: F,
     pc: &ProveConfig,
 ) -> Result<(), String> {
     // Upstream patch ④: phase event — entered the shield path, deposit
@@ -8632,13 +8704,16 @@ fn cmd_shield_rollup(
     let producer_address = profile.dal_fee_address.clone();
 
     // Pool must currently hold at least the fixed fees; otherwise even a
-    // zero-value shield can't settle.
+    // zero-value shield can't settle. E.6: the pool is now keyed by
+    // (asset_id, pubkey_hash) — the user's --asset selects which
+    // pool to drain.
     let pool_balance = rollup
-        .try_read_deposit_balance(&head_hash, &pubkey_hash)?
+        .try_read_deposit_balance(&head_hash, &asset_id, &pubkey_hash)?
         .ok_or_else(|| {
             format!(
-                "deposit pool {} not found or already drained",
-                pubkey_hash_hex(&pubkey_hash)
+                "deposit pool (asset_id {}, {}) not found or already drained",
+                hex::encode(&asset_id),
+                pubkey_hash_hex(&pubkey_hash),
             )
         })?;
     let min_fees = fee
@@ -8701,13 +8776,16 @@ fn cmd_shield_rollup(
     let recipient = recipient_state.payment_address(&ek_v_recipient, &ek_d_recipient);
 
     let outgoing_seed = w.account().outgoing_seed;
-    let note_recipient = build_output_note_with_outgoing(
+    let note_recipient = build_output_note_with_outgoing_asset(
         &recipient,
         amount,
+        &asset_id,
         None,
         &outgoing_seed,
         OutgoingNoteRole::ShieldOutput,
     )?;
+    // Producer-fee note is permanently tez (liquidity argument; see
+    // whitepaper §"Multiasset" fee rationale).
     let note_producer = build_output_note_with_outgoing(
         &producer_address,
         producer_fee,
@@ -8716,6 +8794,9 @@ fn cmd_shield_rollup(
         OutgoingNoteRole::ProducerFee,
     )?;
 
+    // Phase E.6: asset_new = asset_id (user-supplied; ASSET_TEZ by
+    // default). asset_producer stays tez permanently (producer-fee
+    // liquidity argument).
     let sighash = shield_sighash(
         &auth_domain,
         &pubkey_hash,
@@ -8726,7 +8807,7 @@ fn cmd_shield_rollup(
         &note_producer.cm,
         &note_recipient.mh,
         &note_producer.mh,
-        &ASSET_TEZ,
+        &asset_id,
         &ASSET_TEZ,
     );
 
@@ -8792,8 +8873,11 @@ fn cmd_shield_rollup(
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_to_hex(&note_producer.rseed));
 
-        // Phase B: asset_new + asset_producer (both ASSET_TEZ in v1).
-        args.push(felt_to_hex(&ASSET_TEZ));
+        // Phase E.6: asset_new (caller-selected) + asset_producer
+        // (permanent tez). The kernel re-checks asset_new against
+        // its registry; the circuit's commit recompute pins cm_new
+        // to (d_j, v, asset_new).
+        args.push(felt_to_hex(&asset_id));
         args.push(felt_to_hex(&ASSET_TEZ));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
@@ -8803,9 +8887,7 @@ fn cmd_shield_rollup(
 
     save_wallet(path, &w)?;
     let req = ShieldReq {
-        // v1 single-bridge: wallet shield always drains the tez pool.
-        // E.6 will let the user supply --asset to target an FA2 pool.
-        asset_id: ASSET_TEZ,
+        asset_id,
         pubkey_hash,
         fee,
         v: amount,
@@ -10876,14 +10958,18 @@ mod network_profile_tests {
         );
         let funded_balance: u64 = 314_159;
 
+        // E.6: pool key is now `<prefix><asset_hex>/<pubkey_hex>`.
+        // This test exercises the tez pool only.
         let funded_length_route = format!(
-            "/global/block/BLmockhead/durable/wasm_2_0_0/length?key={}{}",
+            "/global/block/BLmockhead/durable/wasm_2_0_0/length?key={}{}/{}",
             DURABLE_DEPOSIT_BALANCE_PREFIX,
+            hex::encode(ASSET_TEZ),
             hex::encode(target_pubkey_hash),
         );
         let funded_value_route = format!(
-            "/global/block/BLmockhead/durable/wasm_2_0_0/value?key={}{}",
+            "/global/block/BLmockhead/durable/wasm_2_0_0/value?key={}{}/{}",
             DURABLE_DEPOSIT_BALANCE_PREFIX,
+            hex::encode(ASSET_TEZ),
             hex::encode(target_pubkey_hash),
         );
 
@@ -10967,13 +11053,15 @@ mod network_profile_tests {
         save_wallet(wallet_path_str, &wallet).expect("save wallet");
 
         let funded_length_route = format!(
-            "/global/block/BLmockhead/durable/wasm_2_0_0/length?key={}{}",
+            "/global/block/BLmockhead/durable/wasm_2_0_0/length?key={}{}/{}",
             DURABLE_DEPOSIT_BALANCE_PREFIX,
+            hex::encode(ASSET_TEZ),
             hex::encode(pkh),
         );
         let funded_value_route = format!(
-            "/global/block/BLmockhead/durable/wasm_2_0_0/value?key={}{}",
+            "/global/block/BLmockhead/durable/wasm_2_0_0/value?key={}{}/{}",
             DURABLE_DEPOSIT_BALANCE_PREFIX,
+            hex::encode(ASSET_TEZ),
             hex::encode(pkh),
         );
         let base_url = super::tests::spawn_mock_http_server(HashMap::from([
@@ -11074,6 +11162,41 @@ mod network_profile_tests {
         // 64 chars but with an embedded non-hex glyph.
         let bad = format!("{}g", &hex[..63]);
         assert!(parse_pubkey_hash_hex(&bad).is_err());
+    }
+
+    /// Phase E.6: parse_asset_id_hex accepts the canonical 64-char
+    /// hex form (with or without the 0x prefix), short hex forms
+    /// (left-padded with zeros), and the literal "tez"/"0"/empty
+    /// shorthands for ASSET_TEZ.
+    #[test]
+    fn parse_asset_id_hex_accepts_canonical_and_shorthand_forms() {
+        // Shorthands for tez.
+        assert_eq!(parse_asset_id_hex("").unwrap(), ASSET_TEZ);
+        assert_eq!(parse_asset_id_hex("tez").unwrap(), ASSET_TEZ);
+        assert_eq!(parse_asset_id_hex("TEZ").unwrap(), ASSET_TEZ);
+        assert_eq!(parse_asset_id_hex("0").unwrap(), ASSET_TEZ);
+
+        // Round-trip a full 64-char hex.
+        let mut sample = ZERO;
+        for (i, b) in sample.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let hex = hex::encode(sample);
+        assert_eq!(parse_asset_id_hex(&hex).unwrap(), sample);
+        assert_eq!(parse_asset_id_hex(&format!("0x{}", hex)).unwrap(), sample);
+        assert_eq!(parse_asset_id_hex(&format!("0X{}", hex)).unwrap(), sample);
+
+        // Short forms left-pad with zeros.
+        let derived = parse_asset_id_hex("dead").unwrap();
+        assert_eq!(derived[30], 0xde);
+        assert_eq!(derived[31], 0xad);
+        for byte in &derived[..30] {
+            assert_eq!(*byte, 0);
+        }
+
+        // Reject oversize and non-hex inputs.
+        assert!(parse_asset_id_hex(&"0".repeat(65)).is_err());
+        assert!(parse_asset_id_hex("xx").is_err());
     }
 
     /// Phase-event wire format is consumed by the daemon's runner.rs
@@ -11310,19 +11433,22 @@ mod network_profile_tests {
     /// `rollup_rpc_load_balances_preserves_raw_json_deposit_balance_key`.
     /// The kernel's deposit-pool balance loader translates each
     /// `PendingDeposit.pubkey_hash` into the durable-storage key
-    /// `/tzel/v1/state/deposits/balance/<hex(pubkey_hash)>` and decodes
-    /// the LE-u64 value at that key. Spawn a mock rollup-node that serves
-    /// exactly that key/value pair, push a PendingDeposit with the
-    /// matching pubkey_hash, and assert the loader returns the expected
-    /// balance keyed on pubkey_hash.
+    /// `/tzel/v1/state/deposits/balance/<hex(asset_id)>/<hex(pubkey_hash)>`
+    /// and decodes the LE-u64 value at that key. Spawn a mock rollup-
+    /// node that serves exactly that key/value pair, push a
+    /// PendingDeposit with the matching pubkey_hash, and assert the
+    /// loader returns the expected balance keyed on pubkey_hash.
+    /// E.6 pool lookups are now scoped by asset_id; this test
+    /// exercises the tez pool.
     #[test]
     fn rollup_rpc_load_pool_balances_preserves_pubkey_hash_key() {
         let pubkey_hash: F = felt_tag(b"pool-balance-test-pkh");
         let amount: u64 = 4_321u64;
         let balance_key = format!(
-            "{}{}",
+            "{}{}/{}",
             DURABLE_DEPOSIT_BALANCE_PREFIX,
-            hex::encode(pubkey_hash)
+            hex::encode(ASSET_TEZ),
+            hex::encode(pubkey_hash),
         );
 
         let base_url = super::tests::spawn_mock_http_server(HashMap::from([
