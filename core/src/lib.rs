@@ -100,10 +100,20 @@ pub const COMPILE_TIME_FA2_BRIDGES: &[&str] = &[];
 /// for membership checks and by the outbox dispatcher (E.4) for
 /// asset → ticketer lookups.
 pub fn compose_asset_registry(tez_ticketer: &str) -> Vec<AssetEntry> {
-    let mut entries = Vec::with_capacity(1 + COMPILE_TIME_FA2_BRIDGES.len());
+    compose_asset_registry_with(tez_ticketer, COMPILE_TIME_FA2_BRIDGES)
+}
+
+/// Like `compose_asset_registry` but takes an explicit FA2 ticketer
+/// list — letting tests and tooling exercise the routing helpers
+/// without having to mutate the kernel-binary const.
+pub fn compose_asset_registry_with<S: AsRef<str>>(
+    tez_ticketer: &str,
+    fa2_ticketers: &[S],
+) -> Vec<AssetEntry> {
+    let mut entries = Vec::with_capacity(1 + fa2_ticketers.len());
     entries.push(AssetEntry::tez(tez_ticketer.to_string()));
-    for fa2 in COMPILE_TIME_FA2_BRIDGES {
-        entries.push(AssetEntry::fa2((*fa2).to_string()));
+    for fa2 in fa2_ticketers {
+        entries.push(AssetEntry::fa2(fa2.as_ref().to_string()));
     }
     entries
 }
@@ -6278,6 +6288,93 @@ mod tests {
             primary,
             "withdrawal record should carry the asset_pub from the proof",
         );
+    }
+
+    // ─── Phase E.5: registry routing helpers ───────────────────────
+
+    /// Two compose_asset_registry calls with the same tez ticketer
+    /// produce the same registry. Verifies the helper is pure.
+    #[test]
+    fn test_compose_asset_registry_deterministic() {
+        let a = compose_asset_registry_with("KT1Tez", &["KT1FA2A", "KT1FA2B"]);
+        let b = compose_asset_registry_with("KT1Tez", &["KT1FA2A", "KT1FA2B"]);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].asset_id, ASSET_TEZ);
+        assert_ne!(a[1].asset_id, ASSET_TEZ);
+        assert_ne!(a[2].asset_id, ASSET_TEZ);
+        assert_ne!(a[1].asset_id, a[2].asset_id);
+    }
+
+    /// ticketer_for_asset / asset_for_ticketer are inverse lookups
+    /// over a Vec<AssetEntry>. Tests both directions.
+    #[test]
+    fn test_registry_lookups_invert() {
+        let registry = compose_asset_registry_with("KT1Tez", &["KT1FA2X"]);
+        let fa2_id = registry[1].asset_id;
+        assert_eq!(ticketer_for_asset(&registry, &ASSET_TEZ), Some("KT1Tez"));
+        assert_eq!(ticketer_for_asset(&registry, &fa2_id), Some("KT1FA2X"));
+        assert_eq!(asset_for_ticketer(&registry, "KT1Tez"), Some(&ASSET_TEZ));
+        assert_eq!(asset_for_ticketer(&registry, "KT1FA2X"), Some(&fa2_id));
+        // Unknown assets / tickers return None.
+        let bogus = u(0xC0FFEE);
+        assert_eq!(ticketer_for_asset(&registry, &bogus), None);
+        assert_eq!(asset_for_ticketer(&registry, "KT1Unknown"), None);
+    }
+
+    /// FA2 deposits should land in their own pool, isolated from
+    /// the tez pool — a tez shield must not be able to drain FA2
+    /// liquidity and vice versa.
+    #[test]
+    fn test_fa2_deposit_isolated_from_tez_pool() {
+        let registry = compose_asset_registry_with("KT1Tez", &["KT1FA2"]);
+        let fa2_id = registry[1].asset_id;
+        let mut ledger = Ledger::new();
+        let alice = hash(b"alice-pubkey-hash");
+        let recipient = deposit_recipient_string(&alice);
+
+        // Credit alice's FA2 pool.
+        apply_deposit(&mut ledger, &fa2_id, &recipient, 1_000)
+            .expect("FA2 deposit");
+
+        // The tez pool for alice must remain zero.
+        assert_eq!(
+            ledger.deposit_balance(&ASSET_TEZ, &alice).unwrap(),
+            None,
+            "tez pool must be untouched by FA2 deposit"
+        );
+        assert_eq!(
+            ledger.deposit_balance(&fa2_id, &alice).unwrap(),
+            Some(1_000),
+            "FA2 pool must hold the deposit"
+        );
+
+        // A tez deposit to the same pubkey hash sits in its own bucket.
+        apply_deposit(&mut ledger, &ASSET_TEZ, &recipient, 7).expect("tez deposit");
+        assert_eq!(
+            ledger.deposit_balance(&ASSET_TEZ, &alice).unwrap(),
+            Some(7),
+        );
+        assert_eq!(
+            ledger.deposit_balance(&fa2_id, &alice).unwrap(),
+            Some(1_000),
+            "FA2 pool unaffected by tez deposit"
+        );
+    }
+
+    /// Outbox dispatch must pick the FA2 ticketer when asset_pub is
+    /// a registered FA2 asset_id, and the tez ticketer when asset_pub
+    /// is ASSET_TEZ. This is the contract that prepare_unshield_outbox
+    /// in the kernel relies on.
+    #[test]
+    fn test_outbox_dispatch_picks_correct_ticketer() {
+        let registry = compose_asset_registry_with("KT1Tez", &["KT1FA2A", "KT1FA2B"]);
+        let fa2_a = registry[1].asset_id;
+        let fa2_b = registry[2].asset_id;
+
+        assert_eq!(ticketer_for_asset(&registry, &ASSET_TEZ).unwrap(), "KT1Tez");
+        assert_eq!(ticketer_for_asset(&registry, &fa2_a).unwrap(), "KT1FA2A");
+        assert_eq!(ticketer_for_asset(&registry, &fa2_b).unwrap(), "KT1FA2B");
     }
 
     /// AssetEntry::tez is always asset_id = ASSET_TEZ regardless of the

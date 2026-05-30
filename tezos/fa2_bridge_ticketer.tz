@@ -1,0 +1,50 @@
+# fa2_bridge_ticketer.tz
+#
+# SKETCH — DO NOT DEPLOY AS-IS.
+#
+# This file documents the parameter / storage shape of an FA2 bridge
+# ticketer. Each registered FA2 asset gets its own deployed ticketer
+# contract (one-ticketer-per-asset, mirroring tez_bridge_ticketer.tz).
+# The asset_id on L2 is derived from the ticketer's address as
+# `hash("tzel:asset:" || ticketer_address)`, so the L2-L1 binding is
+# structural — no on-chain registry of FA2 ↔ asset_id mappings is
+# needed.
+#
+# parameter shape:
+#   (or %mint (pair (nat %amount) (pair (bytes %receiver) (address %rollup)))
+#    %burn   (pair (contract %receiver <FA2_transfer_param>)
+#                  (ticket %ticket (pair nat (option bytes)))))
+#
+# storage shape:
+#   (pair (address %fa2_contract) (nat %token_id))
+#
+# mint flow:
+#   1. Caller pre-approves the ticketer to pull `amount` of token_id
+#      via FA2's `update_operators`.
+#   2. Caller invokes mint with (amount, receiver_bytes, rollup_address).
+#   3. Ticketer calls fa2_contract %transfer to pull `amount` of
+#      token_id from SENDER into SELF_ADDRESS.
+#   4. Ticketer mints an L2 ticket of `amount`, content = (token_id, None),
+#      and forwards it to the rollup with receiver_bytes as the L2
+#      `deposit:<hex pubkey_hash>` recipient.
+#
+# burn flow:
+#   1. Rollup's outbox emits a burn message: (recipient_contract, ticket).
+#   2. Ticketer verifies the ticket's creator == SELF_ADDRESS and that
+#      its content matches the configured token_id.
+#   3. Ticketer calls fa2_contract %transfer to send `amount` of
+#      token_id from SELF_ADDRESS to recipient.
+#
+# Why not inline Michelson here? Hand-assembling the FA2 transfer
+# parameter (a list of (address %from_, list (pair address (pair nat
+# nat)))) is verbose and error-prone. The deployment build will
+# compile the higher-level source (CameLIGO / Archetype) to Michelson
+# and drop the result into this file.
+#
+# The kernel side (tezos/rollup-kernel/src/lib.rs) treats this
+# ticketer exactly like the tez ticketer — same parse_bridge_deposit
+# call shape, same outbox burn message format, same ticket content
+# `(pair nat (option bytes))`. The only difference is that the
+# kernel's compile-time FA2 registry contains the ticketer's L1
+# address; deposits from this address credit the FA2 pool keyed by
+# `derive_asset_id(ticketer)`.
