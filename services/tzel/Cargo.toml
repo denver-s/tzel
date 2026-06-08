@@ -19,6 +19,10 @@ path = "src/bin/gen_interop_scenario.rs"
 name = "tzel-operator"
 path = "src/bin/tzel_operator.rs"
 
+[[bin]]
+name = "derive_asset_id_cli"
+path = "src/bin/derive_asset_id_cli.rs"
+
 [dependencies]
 tzel-core = { path = "../../core" }
 tzel-verifier = { path = "../../verifier" }

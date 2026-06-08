@@ -438,6 +438,114 @@ fn no_storage_mutation_path() {
     );
 }
 
+/// End-to-end origination smoke test using octez-client's mockup
+/// protocol runner. Same protocol code path as a real Tezos network
+/// — proves the contract is not just typeable but actually
+/// originateable with realistic storage. Auto-skips when
+/// octez-client isn't on PATH.
+///
+/// This is the L1 counterpart of the kernel's end-to-end FA2 test
+/// (which uses skip-verify proofs to exercise the L2 routing): both
+/// tests together cover the bridge boundary's contract validation
+/// at protocol-execution depth without requiring a full sandbox.
+#[test]
+fn fa2_bridge_originates_under_octez_client_mockup() {
+    use std::process::Command;
+
+    let bin = ["octez-client", "/home/coder/bin/octez-client"]
+        .iter()
+        .find(|p| Command::new(p).arg("--version").output().is_ok())
+        .copied();
+    let Some(bin) = bin else {
+        eprintln!(
+            "SKIP fa2_bridge_originates_under_octez_client_mockup: \
+             octez-client not on PATH.",
+        );
+        return;
+    };
+
+    let base_dir = std::path::PathBuf::from("/tmp/tzel-fa2-bridge-originate");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).expect("create mockup base dir");
+
+    let protocol = "PtSeouLouXkxhg39oWzjxDWaCydNfR3RxCUrNe4Q9Ro8BTehcbh";
+    let setup = Command::new(bin)
+        .args([
+            "--base-dir",
+            base_dir.to_str().unwrap(),
+            "--mode",
+            "mockup",
+            "--protocol",
+            protocol,
+            "create",
+            "mockup",
+        ])
+        .output()
+        .expect("octez-client create mockup");
+    assert!(setup.status.success(), "mockup setup failed");
+
+    let mut contract = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    contract.push(CONTRACT_PATH_REL);
+
+    // Synthetic FA2 contract + token_id for the storage. The
+    // values don't have to correspond to a real deployed FA2 — the
+    // origination only typechecks the contract's storage against
+    // its declared type and runs the empty trace. Real FA2 calls
+    // happen at mint/burn time, which we don't simulate here
+    // (would require interpreted ticket state).
+    let fa2_contract = "KT1HbQepzV1nVGg8QVznG7z4RcHseD5kwqBn";
+    let token_id = "0";
+    let init_storage = format!("(Pair \"{}\" {})", fa2_contract, token_id);
+
+    let result = Command::new(bin)
+        .args([
+            "--base-dir",
+            base_dir.to_str().unwrap(),
+            "--mode",
+            "mockup",
+            "--protocol",
+            protocol,
+            "originate",
+            "contract",
+            "test-fa2-bridge",
+            "transferring",
+            "0",
+            "from",
+            "bootstrap1",
+            "running",
+            contract.to_str().unwrap(),
+            "--init",
+            &init_storage,
+            "--burn-cap",
+            "5",
+        ])
+        .output()
+        .expect("octez-client originate");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert!(
+        result.status.success(),
+        "origination failed:\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr,
+    );
+    // Output must contain the KT1 of the newly-originated contract.
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("New contract KT1"),
+        "expected 'New contract KT1...' in output:\n{}",
+        combined,
+    );
+    // Storage was successfully type-applied (origination prints the
+    // storage line in its receipt).
+    assert!(
+        combined.contains("This origination was successfully applied"),
+        "expected origination success marker:\n{}",
+        combined,
+    );
+}
+
 /// Real-typechecker run via octez-client mockup, when available.
 /// Auto-skipped (with a clear log line) when `octez-client` isn't on
 /// PATH. This is the ground-truth test that catches every bug the

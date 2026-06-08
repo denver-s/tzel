@@ -401,6 +401,235 @@ pub fn build_transfer_bench_witness(n_inputs: usize) -> BenchWitness {
     }
 }
 
+/// Mixed-asset transfer witness for the slow real-proof FA2 guard.
+///
+/// Builds a 2-input transfer where input 0 carries tez (covering fee
+/// + producer + tez change) and input 1 carries a primary non-tez
+/// asset (becomes the recipient amount). Stress-tests the
+/// 2-accumulator per-asset balance constraint with BOTH lanes
+/// strictly positive — the configuration the pure-tez bench cannot
+/// exercise (its primary lane is always 0 == 0).
+///
+/// Balance:
+///   tez_in     = 40
+///   tez_out    = 32 (change_1 tez) + 0 (change_2 placeholder) + 3 (producer) = 35
+///   fee        = 5; 40 == 35 + 5                                              ✓
+///   primary_in = 30
+///   primary_out = 30 (recipient primary)                                       ✓
+pub fn build_transfer_mixed_assets_bench_witness(primary_asset: F) -> BenchWitness {
+    let account = bench_account();
+    let nk_spend = account.nk;
+    let nk_tag = derive_nk_tag(&nk_spend);
+
+    // Two inputs at auth_idx 0 and 1 sharing the same XMSS tree.
+    let ask_j = derive_ask(&account.ask_base, 0);
+    let d_j = derive_address(&account.incoming_seed, 0);
+    let (auth_root, auth_pub_seed, auth_paths) = build_auth_root_and_paths(&ask_j, 2);
+    let otag = owner_tag(&auth_root, &auth_pub_seed, &nk_tag);
+
+    let v_in_0: u64 = 40; // tez
+    let v_in_1: u64 = 30; // primary
+    let rseed_in_0 = bench_rseed(b"bench-tr-mix-tez", 0);
+    let rseed_in_1 = bench_rseed(b"bench-tr-mix-pri", 1);
+
+    let mut tree = MerkleTree::new();
+    let cm_0 = commit(&d_j, v_in_0, &ASSET_TEZ, &derive_rcm(&rseed_in_0), &otag);
+    tree.append(cm_0);
+    let cm_1 = commit(&d_j, v_in_1, &primary_asset, &derive_rcm(&rseed_in_1), &otag);
+    tree.append(cm_1);
+    let root = tree.root();
+
+    let nf_0 = nullifier(&nk_spend, &cm_0, 0);
+    let nf_1 = nullifier(&nk_spend, &cm_1, 1);
+
+    // Output slots:
+    //   1: recipient primary, v_1 = 30
+    //   2: change_1 tez, v_2 = 32
+    //   3: change_2 placeholder, v_3 = 0
+    //   4: producer tez, v_4 = 3
+    let (d_j_1, auth_root_1, auth_pub_seed_1, nk_tag_1, mh_1, rseed_1) =
+        synthetic_output_fields(0xD300);
+    let (d_j_2, auth_root_2, auth_pub_seed_2, nk_tag_2, mh_2, rseed_2) =
+        synthetic_output_fields(0xE300);
+    let (d_j_3, auth_root_3, auth_pub_seed_3, nk_tag_3, mh_3, rseed_3) =
+        synthetic_output_fields(0xF300);
+    let (d_j_4, auth_root_4, auth_pub_seed_4, nk_tag_4, mh_4, rseed_4) =
+        synthetic_output_fields(0xC300);
+    let fee: u64 = 5;
+    let v_1: u64 = 30;
+    let v_2: u64 = 32;
+    let v_3: u64 = 0;
+    let v_4: u64 = 3;
+
+    let cm_out_1 = commit(
+        &d_j_1,
+        v_1,
+        &primary_asset,
+        &derive_rcm(&rseed_1),
+        &owner_tag(&auth_root_1, &auth_pub_seed_1, &nk_tag_1),
+    );
+    let cm_out_2 = commit(
+        &d_j_2,
+        v_2,
+        &ASSET_TEZ,
+        &derive_rcm(&rseed_2),
+        &owner_tag(&auth_root_2, &auth_pub_seed_2, &nk_tag_2),
+    );
+    let cm_out_3 = commit(
+        &d_j_3,
+        v_3,
+        &ASSET_TEZ,
+        &derive_rcm(&rseed_3),
+        &owner_tag(&auth_root_3, &auth_pub_seed_3, &nk_tag_3),
+    );
+    let cm_out_4 = commit(
+        &d_j_4,
+        v_4,
+        &ASSET_TEZ,
+        &derive_rcm(&rseed_4),
+        &owner_tag(&auth_root_4, &auth_pub_seed_4, &nk_tag_4),
+    );
+
+    let auth_domain = u64_to_felt(0xF300_5001);
+    let nullifiers = vec![nf_0, nf_1];
+    let sighash = transfer_sighash(
+        &auth_domain,
+        &root,
+        &nullifiers,
+        fee,
+        &cm_out_1,
+        &cm_out_2,
+        &cm_out_3,
+        &cm_out_4,
+        &mh_1,
+        &mh_2,
+        &mh_3,
+        &mh_4,
+    );
+
+    let mut cm_paths = Vec::with_capacity(2);
+    let mut wots_sigs = Vec::with_capacity(2);
+    for i in 0..2 {
+        let (cm_path, path_root) = tree.auth_path(i);
+        assert_eq!(path_root, root);
+        cm_paths.push(cm_path);
+        let (sig, _, _) = wots_sign(&ask_j, i as u32, &sighash);
+        wots_sigs.push(sig);
+    }
+
+    let n_inputs = 2usize;
+    let total_fields = 4
+        + 9 * n_inputs
+        + n_inputs * DEPTH
+        + n_inputs * AUTH_DEPTH
+        + n_inputs * WOTS_CHAINS
+        + n_inputs
+        + 9 * 4
+        + 1;
+
+    let mut args: Vec<String> = Vec::with_capacity(total_fields + 1);
+    args.push(felt_u64_to_hex(total_fields as u64));
+    args.push(felt_u64_to_hex(n_inputs as u64));
+    args.push(felt_to_hex(&auth_domain));
+    args.push(felt_to_hex(&root));
+    args.push(felt_u64_to_hex(fee));
+
+    // Per-input fields, in (i, auth_idx) pairs.
+    let in_v = [v_in_0, v_in_1];
+    let in_rseed = [rseed_in_0, rseed_in_1];
+    let in_nf = [nf_0, nf_1];
+    for (i, ((nf, v), rseed)) in in_nf.iter().zip(in_v.iter()).zip(in_rseed.iter()).enumerate() {
+        args.push(felt_to_hex(nf));
+        args.push(felt_to_hex(&nk_spend));
+        args.push(felt_to_hex(&auth_root));
+        args.push(felt_to_hex(&auth_pub_seed));
+        args.push(felt_u64_to_hex(i as u64));
+        args.push(felt_to_hex(&d_j));
+        args.push(felt_u64_to_hex(*v));
+        args.push(felt_to_hex(rseed));
+        args.push(felt_u64_to_hex(i as u64));
+    }
+    for path in &cm_paths {
+        for sib in path {
+            args.push(felt_to_hex(sib));
+        }
+    }
+    for path in &auth_paths {
+        for sib in path {
+            args.push(felt_to_hex(sib));
+        }
+    }
+    for sig in &wots_sigs {
+        for s in sig {
+            args.push(felt_to_hex(s));
+        }
+    }
+
+    // Per-input asset tags: input 0 = tez, input 1 = primary.
+    args.push(felt_to_hex(&ASSET_TEZ));
+    args.push(felt_to_hex(&primary_asset));
+
+    // Output 1: recipient primary
+    args.push(felt_to_hex(&cm_out_1));
+    args.push(felt_to_hex(&d_j_1));
+    args.push(felt_u64_to_hex(v_1));
+    args.push(felt_to_hex(&rseed_1));
+    args.push(felt_to_hex(&auth_root_1));
+    args.push(felt_to_hex(&auth_pub_seed_1));
+    args.push(felt_to_hex(&nk_tag_1));
+    args.push(felt_to_hex(&mh_1));
+    args.push(felt_to_hex(&primary_asset));
+
+    // Output 2: change_1 tez
+    args.push(felt_to_hex(&cm_out_2));
+    args.push(felt_to_hex(&d_j_2));
+    args.push(felt_u64_to_hex(v_2));
+    args.push(felt_to_hex(&rseed_2));
+    args.push(felt_to_hex(&auth_root_2));
+    args.push(felt_to_hex(&auth_pub_seed_2));
+    args.push(felt_to_hex(&nk_tag_2));
+    args.push(felt_to_hex(&mh_2));
+    args.push(felt_to_hex(&ASSET_TEZ));
+
+    // Output 3: change_2 placeholder (tez, v=0)
+    args.push(felt_to_hex(&cm_out_3));
+    args.push(felt_to_hex(&d_j_3));
+    args.push(felt_u64_to_hex(v_3));
+    args.push(felt_to_hex(&rseed_3));
+    args.push(felt_to_hex(&auth_root_3));
+    args.push(felt_to_hex(&auth_pub_seed_3));
+    args.push(felt_to_hex(&nk_tag_3));
+    args.push(felt_to_hex(&mh_3));
+    args.push(felt_to_hex(&ASSET_TEZ));
+
+    // Output 4: producer (tez, permanent pin)
+    args.push(felt_to_hex(&cm_out_4));
+    args.push(felt_to_hex(&d_j_4));
+    args.push(felt_u64_to_hex(v_4));
+    args.push(felt_to_hex(&rseed_4));
+    args.push(felt_to_hex(&auth_root_4));
+    args.push(felt_to_hex(&auth_pub_seed_4));
+    args.push(felt_to_hex(&nk_tag_4));
+    args.push(felt_to_hex(&mh_4));
+    args.push(felt_to_hex(&ASSET_TEZ));
+
+    // primary_non_tez_asset: the FA2 asset the 2-accumulator
+    // constraint accepts alongside tez.
+    args.push(felt_to_hex(&primary_asset));
+
+    let mut expected_public_outputs = vec![auth_domain, root];
+    expected_public_outputs.extend(nullifiers.iter().copied());
+    expected_public_outputs.push(u64_to_felt(fee));
+    expected_public_outputs.extend([
+        cm_out_1, cm_out_2, cm_out_3, cm_out_4, mh_1, mh_2, mh_3, mh_4,
+    ]);
+
+    BenchWitness {
+        args,
+        expected_public_outputs,
+    }
+}
+
 pub fn build_unshield_bench_witness(n_inputs: usize) -> BenchWitness {
     assert!((1..=MAX_BENCH_INPUTS).contains(&n_inputs));
 

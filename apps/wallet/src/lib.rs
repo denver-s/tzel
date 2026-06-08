@@ -3534,7 +3534,10 @@ enum UserCmd {
     /// `deposit:<hex(pubkey_hash)>` for `amount` mutez. Recipient,
     /// fee, and memo are decided later at shield time, not here.
     Deposit {
-        /// L1 mutez to credit to the pool.
+        /// L1 token amount to credit to the pool. For tez this is
+        /// mutez (1 tez = 1_000_000 mutez). For FA2 this is the
+        /// number of FA2 token units, in the FA2 contract's native
+        /// unit.
         #[arg(long)]
         amount: u64,
         /// Emit the Michelson parameters for the bridge deposit call instead of
@@ -3549,6 +3552,18 @@ enum UserCmd {
         /// should always combine `--json --prepare-only`.
         #[arg(long)]
         prepare_only: bool,
+        /// Asset to deposit. Defaults to tez. Pass a hex asset_id
+        /// (or "tez"/"0") for non-tez. For FA2, the wallet looks up
+        /// the asset's ticketer in `compose_asset_registry`, emits
+        /// Michelson params for that ticketer's %mint(amount,
+        /// receiver, rollup) entrypoint, and saves the PendingDeposit
+        /// with `asset_id` set so the recovery scan and balance
+        /// poll target the FA2 pool. The caller must have already
+        /// approved the ticketer to pull `amount` of token_id via
+        /// the FA2 contract's %update_operators entrypoint (E.5
+        /// fa2_bridge_ticketer.tz flow).
+        #[arg(long)]
+        asset: Option<String>,
     },
     /// Reconstruct `PendingDeposit` entries from the seed alone after a
     /// wallet-file loss. For each candidate `(address_index,
@@ -3901,9 +3916,14 @@ fn run_user(cli: UserCli) -> Result<(), String> {
         UserCmd::Deposit {
             amount,
             prepare_only,
+            asset,
         } => {
             let profile = load_required_network_profile(&cli.wallet)?;
-            cmd_bridge_deposit(&cli.wallet, &profile, amount, prepare_only)
+            let asset_id = match asset {
+                None => ASSET_TEZ,
+                Some(ref hex) => parse_asset_id_hex(hex)?,
+            };
+            cmd_bridge_deposit(&cli.wallet, &profile, amount, asset_id, prepare_only)
         }
         UserCmd::RecoverDeposits {
             max_address_index,
@@ -7876,6 +7896,36 @@ fn deposit_mint_michelson_params(
     })
 }
 
+/// Michelson parameters for the FA2 ticketer's `%mint` entrypoint.
+/// Shape matches `tezos/fa2_bridge_ticketer.tz`:
+///   pair (nat %amount) (pair (bytes %receiver) (address %rollup))
+///
+/// Caller MUST have already authorised this ticketer to pull
+/// `amount` of the FA2 contract's configured `token_id` via
+/// %update_operators on the FA2 contract. The ticketer's %mint
+/// dispatches FA2 %transfer to pull tokens from SENDER into
+/// SELF_ADDRESS before minting the L2 ticket to the rollup.
+fn deposit_mint_fa2_michelson_params(
+    amount: u64,
+    pubkey_hash: &F,
+    rollup_address: &str,
+) -> serde_json::Value {
+    let recipient = deposit_recipient_string(pubkey_hash);
+    serde_json::json!({
+        "prim": "Pair",
+        "args": [
+            { "int": amount.to_string() },
+            {
+                "prim": "Pair",
+                "args": [
+                    { "bytes": hex::encode(recipient.as_bytes()) },
+                    { "string": rollup_address },
+                ],
+            },
+        ],
+    })
+}
+
 /// Derive a deterministic blinding factor for a fresh deposit pool.
 /// The blind is `H("tzel-deposit-blind", master_sk, address_index,
 /// deposit_nonce)`, so the *blind itself* is recoverable from the
@@ -7906,11 +7956,49 @@ fn cmd_bridge_deposit(
     path: &str,
     profile: &WalletNetworkProfile,
     amount: u64,
+    asset_id: F,
     prepare_only: bool,
 ) -> Result<(), String> {
+    // FA2 deposits cannot be submitted through octez-client's
+    // transfer-mutez flow — FA2 tokens move via the FA2 contract's
+    // own %transfer entrypoint, which the user must pre-authorise
+    // and which only the L1 signer (Temple / Beacon / Ledger) can
+    // sign. Refuse anything but `prepare-only` for non-tez deposits
+    // and emit the ticketer's mint params for the signer to use.
+    let is_tez = asset_id == ASSET_TEZ;
+    if !is_tez && !prepare_only {
+        return Err(
+            "FA2 deposits require --prepare-only: the L1 signer must \
+             call %update_operators on the FA2 contract and then sign \
+             the FA2 ticketer's %mint(amount, receiver, rollup) \
+             entrypoint. The wallet emits the Michelson params; the \
+             signer drives the L1 ops."
+                .into(),
+        );
+    }
     let rollup = RollupRpc::new(profile);
     let head_hash = rollup.head_hash()?;
     let auth_domain = rollup.read_felt_at_block(&head_hash, DURABLE_AUTH_DOMAIN)?;
+
+    // For FA2 we resolve the ticketer from the asset_id via the
+    // kernel's compose_asset_registry. The tez ticketer comes from
+    // the wallet profile. Either way `bridge_contract` holds the
+    // KT1 we'll target with the mint call.
+    let bridge_contract: String = if is_tez {
+        profile.bridge_ticketer.clone()
+    } else {
+        let registry = compose_asset_registry(&profile.bridge_ticketer);
+        ticketer_for_asset(&registry, &asset_id)
+            .ok_or_else(|| {
+                format!(
+                    "asset_id {} is not in the kernel-binary FA2 bridge \
+                     registry — the kernel won't accept its tickets even \
+                     if the L1 signer submits them",
+                    hex::encode(asset_id),
+                )
+            })?
+            .to_string()
+    };
 
     let mut wallet = load_wallet(path)?;
     let master_sk = wallet.master_sk;
@@ -7958,12 +8046,7 @@ fn cmd_bridge_deposit(
     // successful L1 deposit (which would strand the pool, since only the
     // wallet that knows the blind can recompute pubkey_hash and shield).
     let pending = PendingDeposit {
-        // cmd_bridge_deposit is the tez-deposit entrypoint; FA2
-        // deposits go through their own ticketer (and the wallet
-        // currently constructs them off-band via the L1-signer flow,
-        // not through this command), so the pool key here is fixed
-        // to tez.
-        asset_id: ASSET_TEZ,
+        asset_id,
         pubkey_hash,
         blind,
         address_index,
@@ -7986,26 +8069,49 @@ fn cmd_bridge_deposit(
         // is `deposit_recipient_string(pubkey_hash)` ⇒ `deposit:<hex>`, which
         // is exactly what the bridge ticketer's `mint` entrypoint expects.
         let pubkey_hash_hex_str = pubkey_hash_hex(&pubkey_hash);
-        let params = deposit_mint_michelson_params(&pubkey_hash, &profile.rollup_address);
+        // For FA2 we emit `pair (nat amount) (pair (bytes receiver)
+        // (address rollup))`; the FA2 ticketer's mint pulls
+        // `amount` of token_id from SENDER (the L1 signer) via the
+        // FA2 %transfer entrypoint. For tez we keep the existing
+        // shape `pair (bytes receiver) (address rollup)` and the L1
+        // signer carries the amount in implicit AMOUNT (mutez sent
+        // with the call).
+        let params = if is_tez {
+            deposit_mint_michelson_params(&pubkey_hash, &profile.rollup_address)
+        } else {
+            deposit_mint_fa2_michelson_params(amount, &pubkey_hash, &profile.rollup_address)
+        };
+        let asset_label = if is_tez { "tez (mutez)" } else { "FA2" };
+        let asset_id_hex = hex::encode(asset_id);
         user_out!(
             json: {
-                "bridge_contract" => &profile.bridge_ticketer,
+                "bridge_contract" => &bridge_contract,
                 "entrypoint" => "mint",
                 "params" => params.clone(),
                 "pubkey_hash" => &pubkey_hash_hex_str,
+                "asset_id" => &asset_id_hex,
                 "amount" => amount,
                 "pending_saved" => true,
             },
-            human: "Prepared bridge deposit of {} mutez for pool {} (not submitted)",
-            amount, pubkey_hash_hex_str
+            human: "Prepared bridge deposit of {} {} for pool {} (not submitted)",
+            amount, asset_label, pubkey_hash_hex_str
         );
         if !json_mode() {
-            println!("bridge_contract: {}", profile.bridge_ticketer);
+            println!("bridge_contract: {}", bridge_contract);
             println!("entrypoint:      mint");
             println!(
                 "params:          {}",
                 serde_json::to_string(&params).unwrap_or_default()
             );
+            if !is_tez {
+                println!(
+                    "FA2 deposit prerequisite: caller must first \
+                     %update_operators on the FA2 contract authorising \
+                     bridge_contract to pull {} units of its configured \
+                     token_id.",
+                    amount,
+                );
+            }
             println!(
                 "Caller must sign + broadcast the operation (e.g. via Temple) \
                  and then notify the daemon via POST /api/deposit/submitted."
@@ -11797,6 +11903,42 @@ mod network_profile_tests {
             args[1].get("bytes").is_none(),
             "second arg must be `string`, not `bytes`"
         );
+    }
+
+    /// FA2 mint Michelson params: `pair (nat amount) (pair (bytes
+    /// receiver) (address rollup))`. Pinned exactly because the L1
+    /// signer (Temple/Beacon/Ledger) needs to see this shape and
+    /// any drift would silently send the L1 ticket with bad
+    /// parameters.
+    #[test]
+    fn deposit_mint_fa2_michelson_params_match_expected_shape() {
+        let pubkey_hash: F = std::array::from_fn(|i| (i as u8) + 1);
+        let rollup_address = "sr1C7caq3WfNfQMAri4QxNb9Fkxsn6WrgMQP";
+        let amount = 1_000_000u64;
+        let params = deposit_mint_fa2_michelson_params(amount, &pubkey_hash, rollup_address);
+
+        // Outer pair.
+        assert_eq!(params["prim"], "Pair");
+        let outer = params["args"].as_array().unwrap();
+        assert_eq!(outer.len(), 2);
+
+        // First: nat amount, as Michelson int literal (string-encoded
+        // — the JSON encoding of Micheline preserves natural numbers
+        // as decimal strings to keep big integers safe).
+        assert_eq!(outer[0]["int"], amount.to_string());
+        assert!(outer[0].get("bytes").is_none());
+
+        // Second: nested pair (bytes receiver, address rollup).
+        assert_eq!(outer[1]["prim"], "Pair");
+        let inner = outer[1]["args"].as_array().unwrap();
+        assert_eq!(inner.len(), 2);
+
+        let recipient_ascii = format!("deposit:{}", hex::encode(&pubkey_hash));
+        assert_eq!(
+            inner[0]["bytes"].as_str().unwrap(),
+            hex::encode(recipient_ascii.as_bytes()),
+        );
+        assert_eq!(inner[1]["string"], rollup_address);
     }
 
     /// Pool-model port of the legacy
