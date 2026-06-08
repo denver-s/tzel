@@ -2453,12 +2453,30 @@ pub fn apply_deposit<S: LedgerState>(
 /// without re-checking anything that was already validated.
 #[derive(Clone, Debug)]
 pub struct PreparedShield {
-    /// L2 asset_id whose pool will be debited. The shield request
-    /// supplies this and `prepare_shield` validates that the pool keyed
-    /// by `(asset_id, pubkey_hash)` has at least `debit` available.
+    /// L2 asset_id whose pool will be debited for the recipient
+    /// note + kernel fee. `prepare_shield` validates that the pool
+    /// keyed by `(asset_id, pubkey_hash)` has at least `asset_debit`
+    /// available.
     pub asset_id: F,
     pub pubkey_hash: F,
-    pub debit: u64,
+    /// Amount to debit from the `(asset_id, pubkey_hash)` pool —
+    /// always equal to `v + fee` (the recipient note + kernel fee).
+    pub asset_debit: u64,
+    /// Amount to debit from the `(ASSET_TEZ, pubkey_hash)` pool —
+    /// always equal to `producer_fee`. The producer-fee output note
+    /// is permanently tez (DAL slot publisher liquidity argument),
+    /// so any non-tez shield MUST also debit the user's tez pool
+    /// for `producer_fee`. Without this separate debit, an FA2
+    /// shield would mint `producer_fee` tez in the commitment tree
+    /// without any L1 tez backing — the producer (or anyone holding
+    /// the resulting tez note) could then drain real tez from the
+    /// tez ticketer.
+    ///
+    /// For tez-only shields (`asset_id == ASSET_TEZ`), the two
+    /// debits are summed into a single pool operation by
+    /// `commit_prepared_shield`. The split is logical, not
+    /// per-call.
+    pub producer_fee_tez_debit: u64,
     pub client_cm: F,
     pub client_enc: EncryptedNote,
     pub producer_cm: F,
@@ -2472,8 +2490,18 @@ impl PreparedShield {
     pub fn pubkey_hash(&self) -> &F {
         &self.pubkey_hash
     }
+    /// Total debit aggregated for the asset pool. For tez shields
+    /// this is `v + fee + producer_fee`; for FA2 shields it's
+    /// `v + fee` (the `producer_fee` portion comes out of the tez
+    /// pool via `producer_fee_tez_debit`).
     pub fn debit(&self) -> u64 {
-        self.debit
+        self.asset_debit
+    }
+    pub fn asset_debit(&self) -> u64 {
+        self.asset_debit
+    }
+    pub fn producer_fee_tez_debit(&self) -> u64 {
+        self.producer_fee_tez_debit
     }
     pub fn client_note(&self) -> (&F, &EncryptedNote) {
         (&self.client_cm, &self.client_enc)
@@ -2519,11 +2547,27 @@ pub fn prepare_shield<S: LedgerState>(
     let mh_recipient = memo_ct_hash(&req.client_enc);
     let mh_producer = memo_ct_hash(&req.producer_enc);
 
-    let debit = req
+    // Split the shield debit by asset:
+    //   - (req.asset_id, pubkey) pool pays for the recipient note +
+    //     kernel fee (v + fee).
+    //   - (ASSET_TEZ, pubkey) pool pays the producer fee, which is
+    //     PERMANENTLY a tez output regardless of the shielded asset
+    //     (DAL slot publisher liquidity argument). Without this
+    //     separate tez debit, an FA2 shield would mint
+    //     `producer_fee` tez into the commitment tree out of nothing
+    //     — backed only by other users' tez deposits when the
+    //     producer (or anyone holding the resulting note) later
+    //     unshields it. That would let an attacker who shields any
+    //     FA2 asset drain real tez from the tez ticketer.
+    //
+    // For tez shields (req.asset_id == ASSET_TEZ) the two debits
+    // touch the same pool; `commit_prepared_shield` collapses them
+    // into a single pool operation.
+    let asset_debit = req
         .v
         .checked_add(req.fee)
-        .and_then(|value| value.checked_add(req.producer_fee))
-        .ok_or_else(|| "shield debit overflow".to_string())?;
+        .ok_or_else(|| "shield debit overflow (v + fee)".to_string())?;
+    let producer_fee_tez_debit = req.producer_fee;
 
     let pool_balance = state
         .deposit_balance(&req.asset_id, &req.pubkey_hash)?
@@ -2534,11 +2578,45 @@ pub fn prepare_shield<S: LedgerState>(
                 hex::encode(&req.pubkey_hash),
             )
         })?;
-    if pool_balance < debit {
+    let asset_required = if req.asset_id == ASSET_TEZ {
+        // Same pool covers both debits.
+        asset_debit
+            .checked_add(producer_fee_tez_debit)
+            .ok_or_else(|| "shield debit overflow (v + fee + producer_fee)".to_string())?
+    } else {
+        asset_debit
+    };
+    if pool_balance < asset_required {
         return Err(format!(
-            "deposit pool balance ({}) too small for v + fee + producer_fee ({})",
-            pool_balance, debit
+            "deposit pool balance ({}) too small for v + fee{} ({})",
+            pool_balance,
+            if req.asset_id == ASSET_TEZ {
+                " + producer_fee"
+            } else {
+                ""
+            },
+            asset_required,
         ));
+    }
+
+    // For FA2 shields the user must also have a tez pool at the
+    // same pubkey_hash to cover producer_fee.
+    if req.asset_id != ASSET_TEZ {
+        let tez_pool_balance = state
+            .deposit_balance(&ASSET_TEZ, &req.pubkey_hash)?
+            .ok_or_else(|| {
+                format!(
+                    "no tez deposit pool at pubkey_hash {} — non-tez shields require a separate tez pool to fund producer_fee ({})",
+                    hex::encode(&req.pubkey_hash),
+                    producer_fee_tez_debit,
+                )
+            })?;
+        if tez_pool_balance < producer_fee_tez_debit {
+            return Err(format!(
+                "tez deposit pool balance ({}) too small for producer_fee ({}) — required because producer fees are permanently tez",
+                tez_pool_balance, producer_fee_tez_debit,
+            ));
+        }
     }
 
     if let Proof::Stark {
@@ -2600,7 +2678,8 @@ pub fn prepare_shield<S: LedgerState>(
     Ok(PreparedShield {
         asset_id: req.asset_id,
         pubkey_hash: req.pubkey_hash,
-        debit,
+        asset_debit,
+        producer_fee_tez_debit,
         client_cm: req.client_cm,
         client_enc: req.client_enc.clone(),
         producer_cm: req.producer_cm,
@@ -2623,7 +2702,24 @@ pub fn commit_prepared_shield<S: LedgerState>(
     state: &mut S,
     prepared: PreparedShield,
 ) -> Result<ShieldResp, String> {
-    state.debit_deposit(&prepared.asset_id, &prepared.pubkey_hash, prepared.debit)?;
+    // For tez shields the asset and tez debits collapse onto the
+    // same pool, so we do a single combined call to keep the
+    // existing storage-write pattern (one entry touched). For FA2
+    // shields we MUST debit both pools — the (asset_id, pubkey)
+    // pool covers the recipient note + kernel fee, and the
+    // (ASSET_TEZ, pubkey) pool covers the producer-fee tez note.
+    // Without the second debit, FA2 shields would mint
+    // `producer_fee` tez in the commitment tree out of nothing.
+    if prepared.asset_id == ASSET_TEZ {
+        let combined = prepared
+            .asset_debit
+            .checked_add(prepared.producer_fee_tez_debit)
+            .ok_or_else(|| "shield combined debit overflow".to_string())?;
+        state.debit_deposit(&ASSET_TEZ, &prepared.pubkey_hash, combined)?;
+    } else {
+        state.debit_deposit(&prepared.asset_id, &prepared.pubkey_hash, prepared.asset_debit)?;
+        state.debit_deposit(&ASSET_TEZ, &prepared.pubkey_hash, prepared.producer_fee_tez_debit)?;
+    }
     state.mark_applied_shield(prepared.client_cm)?;
     let index = state.append_note(prepared.client_cm, prepared.client_enc)?;
     let producer_index = state.append_note(prepared.producer_cm, prepared.producer_enc)?;
@@ -5034,6 +5130,223 @@ mod tests {
             Some(debit - 1)
         );
         assert!(ledger.memos.is_empty());
+    }
+
+    /// Phase E.5 (bug #2 regression): an FA2 shield request MUST be
+    /// rejected when the user has NO tez deposit pool at the same
+    /// pubkey_hash, even if their FA2 pool is fully funded for
+    /// (v + fee). The producer-fee output note is permanently tez,
+    /// so the kernel must debit `producer_fee` tez from the user's
+    /// tez pool. Without this check, an FA2 shield would mint
+    /// `producer_fee` tez in the commitment tree out of nothing —
+    /// drainable later via the tez ticketer's L1 backing, funded by
+    /// other users' real tez deposits.
+    #[test]
+    fn test_apply_shield_fa2_rejects_when_user_has_no_tez_pool() {
+        let (_acc, addr, _dk_v, _dk_d, _nk_spend) = sample_address_bundle(0x95, 0);
+        let mut ledger = Ledger::new();
+        let fee = MIN_TX_FEE;
+        let producer_fee = 7;
+        let v = 125u64;
+        let auth_domain = ledger.auth_domain;
+        let blind = felt_tag(b"fa2-no-tez-pool-test");
+        let pubkey_hash = test_pubkey_hash_for_address(&auth_domain, &addr, &blind);
+        let fa2_asset = derive_asset_id("KT1FA2Ticketer");
+        assert_ne!(fa2_asset, ASSET_TEZ);
+
+        let (enc, cm) = deterministic_note(&addr, v, u(33), Some(b"fa2-shield"));
+        let (producer_enc, producer_cm) =
+            deterministic_note(&addr, producer_fee, u(34), Some(b"dal"));
+
+        // Fully fund the FA2 pool for v + fee.
+        apply_deposit(
+            &mut ledger,
+            &fa2_asset,
+            &deposit_recipient_string(&pubkey_hash),
+            v + fee,
+        )
+        .unwrap();
+        // Crucially, do NOT credit any tez pool at this pubkey_hash.
+
+        let err = apply_shield(
+            &mut ledger,
+            &ShieldReq {
+                asset_id: fa2_asset,
+                pubkey_hash,
+                fee,
+                v,
+                producer_fee,
+                proof: Proof::TrustMeBro,
+                client_cm: cm,
+                client_enc: enc,
+                producer_cm,
+                producer_enc,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("no tez deposit pool") && err.contains("producer_fee"),
+            "err = {}",
+            err,
+        );
+        // FA2 pool untouched (rejection left state intact); no tez
+        // pool ever existed.
+        assert_eq!(
+            ledger.deposit_balance(&fa2_asset, &pubkey_hash).unwrap(),
+            Some(v + fee),
+            "FA2 pool must be untouched when the shield is rejected pre-commit",
+        );
+        assert_eq!(
+            ledger.deposit_balance(&ASSET_TEZ, &pubkey_hash).unwrap(),
+            None,
+            "no tez pool must exist after the rejected shield",
+        );
+        assert!(
+            ledger.memos.is_empty(),
+            "rejected shield must not append any notes",
+        );
+    }
+
+    /// Phase E.5 (bug #2 regression): an FA2 shield request MUST be
+    /// rejected when the user's tez pool exists but is too small to
+    /// cover `producer_fee`. Both pools must reach the rejection
+    /// without any mutation (FA2 pool full, tez pool underfunded but
+    /// non-zero).
+    #[test]
+    fn test_apply_shield_fa2_rejects_when_tez_pool_too_small_for_producer_fee() {
+        let (_acc, addr, _dk_v, _dk_d, _nk_spend) = sample_address_bundle(0x96, 0);
+        let mut ledger = Ledger::new();
+        let fee = MIN_TX_FEE;
+        let producer_fee = 10;
+        let v = 200u64;
+        let auth_domain = ledger.auth_domain;
+        let blind = felt_tag(b"fa2-tez-pool-too-small-test");
+        let pubkey_hash = test_pubkey_hash_for_address(&auth_domain, &addr, &blind);
+        let fa2_asset = derive_asset_id("KT1FA2Ticketer2");
+
+        let (enc, cm) = deterministic_note(&addr, v, u(35), Some(b"fa2-shield"));
+        let (producer_enc, producer_cm) =
+            deterministic_note(&addr, producer_fee, u(36), Some(b"dal"));
+
+        apply_deposit(
+            &mut ledger,
+            &fa2_asset,
+            &deposit_recipient_string(&pubkey_hash),
+            v + fee,
+        )
+        .unwrap();
+        // Underfund the tez pool by 1.
+        apply_deposit(
+            &mut ledger,
+            &ASSET_TEZ,
+            &deposit_recipient_string(&pubkey_hash),
+            producer_fee - 1,
+        )
+        .unwrap();
+
+        let err = apply_shield(
+            &mut ledger,
+            &ShieldReq {
+                asset_id: fa2_asset,
+                pubkey_hash,
+                fee,
+                v,
+                producer_fee,
+                proof: Proof::TrustMeBro,
+                client_cm: cm,
+                client_enc: enc,
+                producer_cm,
+                producer_enc,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("tez deposit pool") && err.contains("producer_fee"),
+            "err = {}",
+            err,
+        );
+        assert_eq!(
+            ledger.deposit_balance(&fa2_asset, &pubkey_hash).unwrap(),
+            Some(v + fee),
+            "FA2 pool must be untouched on rejection",
+        );
+        assert_eq!(
+            ledger.deposit_balance(&ASSET_TEZ, &pubkey_hash).unwrap(),
+            Some(producer_fee - 1),
+            "tez pool must keep its underfunded balance on rejection",
+        );
+        assert!(ledger.memos.is_empty());
+    }
+
+    /// Phase E.5 (bug #2 happy path): an FA2 shield succeeds when
+    /// BOTH the FA2 pool (v + fee) AND the tez pool (producer_fee)
+    /// are funded at the same pubkey_hash, debiting each pool
+    /// independently.
+    #[test]
+    fn test_apply_shield_fa2_debits_both_fa2_and_tez_pools_independently() {
+        let (_acc, addr, _dk_v, _dk_d, _nk_spend) = sample_address_bundle(0x97, 0);
+        let mut ledger = Ledger::new();
+        let fee = MIN_TX_FEE;
+        let producer_fee = 13;
+        let v = 250u64;
+        let auth_domain = ledger.auth_domain;
+        let blind = felt_tag(b"fa2-both-pools-funded-test");
+        let pubkey_hash = test_pubkey_hash_for_address(&auth_domain, &addr, &blind);
+        let fa2_asset = derive_asset_id("KT1FA2Ticketer3");
+
+        let (enc, cm) = deterministic_note(&addr, v, u(37), Some(b"fa2-shield"));
+        let (producer_enc, producer_cm) =
+            deterministic_note(&addr, producer_fee, u(38), Some(b"dal"));
+
+        // Fund FA2 with exactly v + fee and tez with exactly
+        // producer_fee. After the shield both pools must drain to
+        // zero.
+        apply_deposit(
+            &mut ledger,
+            &fa2_asset,
+            &deposit_recipient_string(&pubkey_hash),
+            v + fee,
+        )
+        .unwrap();
+        apply_deposit(
+            &mut ledger,
+            &ASSET_TEZ,
+            &deposit_recipient_string(&pubkey_hash),
+            producer_fee,
+        )
+        .unwrap();
+
+        apply_shield(
+            &mut ledger,
+            &ShieldReq {
+                asset_id: fa2_asset,
+                pubkey_hash,
+                fee,
+                v,
+                producer_fee,
+                proof: Proof::TrustMeBro,
+                client_cm: cm,
+                client_enc: enc,
+                producer_cm,
+                producer_enc,
+            },
+        )
+        .expect("FA2 shield with both pools funded must succeed");
+
+        // Fully drained pools are removed from the Ledger's
+        // HashMap, so balance lookups return None (not Some(0)).
+        assert_eq!(
+            ledger.deposit_balance(&fa2_asset, &pubkey_hash).unwrap(),
+            None,
+            "FA2 pool must be fully drained by (v + fee)",
+        );
+        assert_eq!(
+            ledger.deposit_balance(&ASSET_TEZ, &pubkey_hash).unwrap(),
+            None,
+            "tez pool must be fully drained by producer_fee",
+        );
     }
 
     #[test]

@@ -9238,6 +9238,18 @@ fn cmd_shield_rollup(
     // zero-value shield can't settle. E.6: the pool is now keyed by
     // (asset_id, pubkey_hash) — the user's --asset selects which
     // pool to drain.
+    //
+    // Phase E.5 (bug #2): the producer-fee output note is permanently
+    // tez (DAL slot publisher liquidity argument), so when the user
+    // shields a non-tez asset the kernel debits `producer_fee` from a
+    // SEPARATE (ASSET_TEZ, pubkey_hash) pool. We mirror that split
+    // here: the asset pool funds (v + tx_fee); the user's tez pool
+    // (if shielding FA2) funds producer_fee. Without this client-side
+    // split, the wallet would either misreport "insufficient
+    // balance" (when the asset pool lacks the extra producer_fee
+    // worth of an unrelated unit) or build a request the kernel
+    // would reject for an empty/underfunded tez pool.
+    let is_tez_shield = asset_id == ASSET_TEZ;
     let pool_balance = rollup
         .try_read_deposit_balance(&head_hash, &asset_id, &pubkey_hash)?
         .ok_or_else(|| {
@@ -9247,35 +9259,65 @@ fn cmd_shield_rollup(
                 pubkey_hash_hex(&pubkey_hash),
             )
         })?;
-    let min_fees = fee
-        .checked_add(producer_fee)
-        .ok_or_else(|| "fee + producer_fee overflow".to_string())?;
-    if pool_balance < min_fees {
+    let asset_min_fees = if is_tez_shield {
+        // Same pool covers tx_fee + producer_fee.
+        fee.checked_add(producer_fee)
+            .ok_or_else(|| "fee + producer_fee overflow".to_string())?
+    } else {
+        fee
+    };
+    if pool_balance < asset_min_fees {
         return Err(format!(
-            "deposit pool {} balance {} < required fees {} (tx_fee {} + producer_fee {})",
+            "deposit pool {} balance {} < required asset-side fees {} ({})",
             pubkey_hash_hex(&pubkey_hash),
             pool_balance,
-            min_fees,
-            fee,
-            producer_fee,
+            asset_min_fees,
+            if is_tez_shield {
+                format!("tx_fee {} + producer_fee {}", fee, producer_fee)
+            } else {
+                format!("tx_fee {}", fee)
+            },
         ));
+    }
+    // For FA2 shields, also verify the user's tez pool can cover
+    // producer_fee. This mirrors the kernel-side check in
+    // prepare_shield / prepare_durable_shield_commit so the wallet
+    // catches the failure early instead of submitting a doomed
+    // request.
+    if !is_tez_shield {
+        let tez_pool_balance = rollup
+            .try_read_deposit_balance(&head_hash, &ASSET_TEZ, &pubkey_hash)?
+            .ok_or_else(|| {
+                format!(
+                    "FA2 shield requires a tez deposit pool at {} to fund producer_fee ({}); none found",
+                    pubkey_hash_hex(&pubkey_hash),
+                    producer_fee,
+                )
+            })?;
+        if tez_pool_balance < producer_fee {
+            return Err(format!(
+                "FA2 shield: tez deposit pool {} balance {} < producer_fee {} (producer-fee notes are permanently tez)",
+                pubkey_hash_hex(&pubkey_hash),
+                tez_pool_balance,
+                producer_fee,
+            ));
+        }
     }
     let amount = match amount_arg {
         Some(a) => a,
-        None => pool_balance - min_fees,
+        None => pool_balance - asset_min_fees,
     };
     let total_drain = amount
-        .checked_add(min_fees)
+        .checked_add(asset_min_fees)
         .ok_or_else(|| "shield total draw overflow".to_string())?;
     if pool_balance < total_drain {
         return Err(format!(
-            "deposit pool {} balance {} < requested draw {} (amount {} + tx_fee {} + producer_fee {})",
+            "deposit pool {} balance {} < requested draw {} (amount {} + asset-side fees {})",
             pubkey_hash_hex(&pubkey_hash),
             pool_balance,
             total_drain,
             amount,
-            fee,
-            producer_fee,
+            asset_min_fees,
         ));
     }
 

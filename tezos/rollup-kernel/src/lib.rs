@@ -1377,11 +1377,22 @@ struct PreparedDurableShieldCommit {
     branch_values: Vec<(usize, F)>,
     new_tree_root: F,
     new_tree_size: u64,
-    /// Path of the deposit-pool balance entry for `pubkey_hash`.
+    /// Path of the (asset_id, pubkey_hash) deposit-pool balance entry
+    /// to debit for v + fee. For tez shields this is also the path
+    /// debited for producer_fee (collapsed). For FA2 shields a
+    /// separate `tez_balance_path` debits the producer_fee tez.
     balance_path: Vec<u8>,
-    /// New balance value to write. If zero, the apply step writes empty
-    /// bytes (best-effort delete) so the entry doesn't accumulate.
+    /// New balance value to write to `balance_path`. If zero, the
+    /// apply step writes empty bytes (best-effort delete).
     new_balance: u64,
+    /// Phase E.5 producer-fee fix: for FA2 shields the producer-fee
+    /// note is permanently tez, so the user must ALSO have a tez
+    /// deposit pool at `pubkey_hash` to back it. The kernel debits
+    /// `producer_fee` tez from `(ASSET_TEZ, pubkey_hash)` here.
+    /// `None` for tez shields (which collapse both debits into
+    /// `balance_path`).
+    tez_balance_path: Option<Vec<u8>>,
+    new_tez_balance: u64,
     /// Optional new valid-root marker (only if the resulting root is fresh).
     root_marker: Option<(u64, F)>,
     /// Path of the replay-protection marker for this shield's
@@ -1411,7 +1422,21 @@ fn prepare_durable_shield_commit<H: Host>(
         ));
     }
 
-    // 1. Validate the pool balance without mutating.
+    // 1. Validate the asset pool balance. The user's (asset_id,
+    // pubkey_hash) pool pays for the recipient note + kernel fee.
+    // For tez shields this also covers the producer fee (same
+    // asset); for FA2 shields producer_fee comes out of the user's
+    // tez pool below.
+    let is_tez_shield = *prepared.asset_id() == tzel_core::ASSET_TEZ;
+    let asset_required = if is_tez_shield {
+        prepared
+            .asset_debit()
+            .checked_add(prepared.producer_fee_tez_debit())
+            .ok_or_else(|| "shield combined debit overflow".to_string())?
+    } else {
+        prepared.asset_debit()
+    };
+
     let balance_path = deposit_balance_path(prepared.asset_id(), prepared.pubkey_hash());
     let balance_bytes = ledger.host.read_store(&balance_path, 8).ok_or_else(|| {
         format!(
@@ -1421,7 +1446,6 @@ fn prepare_durable_shield_commit<H: Host>(
         )
     })?;
     if balance_bytes.is_empty() {
-        // Best-effort-deleted pool — treat as missing.
         return Err(format!(
             "no deposit pool for (asset_id {}, pubkey_hash {}); submit an L1 bridge deposit first",
             hex::encode(prepared.asset_id()),
@@ -1435,16 +1459,59 @@ fn prepare_durable_shield_commit<H: Host>(
         ));
     }
     let balance = u64::from_le_bytes(balance_bytes.try_into().unwrap());
-    if balance < prepared.debit() {
+    if balance < asset_required {
         return Err(format!(
-            "deposit pool ({}, {}) balance {} too small for v + fee + producer_fee = {}",
+            "deposit pool ({}, {}) balance {} too small for v + fee{} = {}",
             hex::encode(prepared.asset_id()),
             hex::encode(prepared.pubkey_hash()),
             balance,
-            prepared.debit()
+            if is_tez_shield { " + producer_fee" } else { "" },
+            asset_required,
         ));
     }
-    let new_balance = balance - prepared.debit();
+    let new_balance = balance - asset_required;
+
+    // For FA2 shields, also validate + plan the debit on the
+    // (ASSET_TEZ, pubkey_hash) pool for producer_fee. Without this
+    // separate debit, an FA2 shield would mint producer_fee tez
+    // into the commitment tree out of nothing — drainable by the
+    // producer (or anyone holding the resulting note) at unshield
+    // time, backed by other users' real tez deposits.
+    let (tez_balance_path, new_tez_balance) = if is_tez_shield {
+        (None, 0u64)
+    } else {
+        let tez_path = deposit_balance_path(&tzel_core::ASSET_TEZ, prepared.pubkey_hash());
+        let tez_bytes = ledger.host.read_store(&tez_path, 8).ok_or_else(|| {
+            format!(
+                "no tez deposit pool at pubkey_hash {} — non-tez shields require a tez pool to fund producer_fee ({})",
+                hex::encode(prepared.pubkey_hash()),
+                prepared.producer_fee_tez_debit(),
+            )
+        })?;
+        if tez_bytes.is_empty() {
+            return Err(format!(
+                "no tez deposit pool at pubkey_hash {} — non-tez shields require a tez pool to fund producer_fee ({})",
+                hex::encode(prepared.pubkey_hash()),
+                prepared.producer_fee_tez_debit(),
+            ));
+        }
+        if tez_bytes.len() != 8 {
+            return Err(format!(
+                "bad u64 at {}",
+                String::from_utf8_lossy(&tez_path)
+            ));
+        }
+        let tez_balance = u64::from_le_bytes(tez_bytes.try_into().unwrap());
+        if tez_balance < prepared.producer_fee_tez_debit() {
+            return Err(format!(
+                "tez deposit pool at pubkey_hash {} balance {} too small for producer_fee = {}",
+                hex::encode(prepared.pubkey_hash()),
+                tez_balance,
+                prepared.producer_fee_tez_debit(),
+            ));
+        }
+        (Some(tez_path), tez_balance - prepared.producer_fee_tez_debit())
+    };
 
     // 2. Reject shield replays. The kernel records each successfully
     // applied shield's `client_cm`; if the same `client_cm` arrives
@@ -1522,6 +1589,8 @@ fn prepare_durable_shield_commit<H: Host>(
         new_tree_size: tree_size,
         balance_path,
         new_balance,
+        tez_balance_path,
+        new_tez_balance,
         root_marker,
         applied_shield_path,
         response: ShieldResp {
@@ -1544,14 +1613,27 @@ fn apply_durable_shield_commit<H: Host>(
     ledger: &mut DurableLedgerState<'_, H>,
     commit: PreparedDurableShieldCommit,
 ) -> ShieldResp {
-    // Debit the deposit pool. Zero balance triggers a best-effort delete
-    // (empty value) to bound durable footprint.
+    // Debit the (asset_id, pubkey) deposit pool. Zero balance
+    // triggers a best-effort delete (empty value) to bound durable
+    // footprint.
     if commit.new_balance == 0 {
         ledger.host.write_store(&commit.balance_path, &[]);
     } else {
         ledger
             .host
             .write_store(&commit.balance_path, &commit.new_balance.to_le_bytes());
+    }
+    // For FA2 shields, also debit the user's (ASSET_TEZ, pubkey)
+    // pool for the producer_fee tez. See PreparedDurableShieldCommit's
+    // tez_balance_path doc for the rationale.
+    if let Some(tez_path) = &commit.tez_balance_path {
+        if commit.new_tez_balance == 0 {
+            ledger.host.write_store(tez_path, &[]);
+        } else {
+            ledger
+                .host
+                .write_store(tez_path, &commit.new_tez_balance.to_le_bytes());
+        }
     }
 
     // Record the replay-protection marker for this shield's `client_cm`.
@@ -4642,21 +4724,34 @@ mod tests {
             &blind,
         );
 
-        // ─── 1. FA2 deposit lands in the FA2 pool ─────────────
-        let deposit_amount = v + producer_fee + MIN_TX_FEE;
+        // ─── 1. FA2 + tez deposits land in their respective pools.
+        // The FA2 pool covers the recipient note + kernel fee; the
+        // tez pool covers the producer_fee tez (a permanent
+        // requirement of the multiasset bridge, see
+        // prepare_shield's split-debit comment).
+        let fa2_deposit_amount = v + MIN_TX_FEE;
+        let tez_deposit_amount = producer_fee;
         host.inputs.push_back(InputMessage {
             level: 2,
             id: 0,
             payload: encode_fa2_ticket_deposit_message(
                 sample_fa2_ticketer(),
                 &deposit_recipient_string(&pubkey_hash),
-                deposit_amount,
+                fa2_deposit_amount,
+            ),
+        });
+        host.inputs.push_back(InputMessage {
+            level: 2,
+            id: 1,
+            payload: encode_ticket_deposit_message(
+                &deposit_recipient_string(&pubkey_hash),
+                tez_deposit_amount,
             ),
         });
         run_with_host(&mut host);
         assert!(
             matches!(read_last_result(&host).unwrap(), KernelResult::Deposit),
-            "FA2 deposit must be accepted by a kernel that registered the ticketer",
+            "FA2 + tez deposits must be accepted by a kernel that registered the FA2 ticketer",
         );
 
         let fa2_pool_path = deposit_balance_path(&fa2_asset, &pubkey_hash);
@@ -4666,11 +4761,14 @@ mod tests {
             .expect("FA2 pool must exist after FA2 deposit");
         assert_eq!(
             u64::from_le_bytes(fa2_balance_bytes.try_into().unwrap()),
-            deposit_amount,
+            fa2_deposit_amount,
         );
-        assert!(
-            host.read_store(&tez_pool_path, 8).is_none(),
-            "tez pool must NOT be credited by an FA2 deposit",
+        let tez_balance_bytes = host
+            .read_store(&tez_pool_path, 8)
+            .expect("tez pool must exist (funds the producer-fee note)");
+        assert_eq!(
+            u64::from_le_bytes(tez_balance_bytes.try_into().unwrap()),
+            tez_deposit_amount,
         );
 
         // ─── 2. FA2 shield drains the FA2 pool ────────────────
