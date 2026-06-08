@@ -100,7 +100,54 @@ pub const COMPILE_TIME_FA2_BRIDGES: &[&str] = &[];
 /// for membership checks and by the outbox dispatcher (E.4) for
 /// asset → ticketer lookups.
 pub fn compose_asset_registry(tez_ticketer: &str) -> Vec<AssetEntry> {
+    #[cfg(feature = "test-fa2-bridges")]
+    {
+        let override_list = test_fa2_bridges::current();
+        if !override_list.is_empty() {
+            return compose_asset_registry_with(tez_ticketer, &override_list);
+        }
+    }
     compose_asset_registry_with(tez_ticketer, COMPILE_TIME_FA2_BRIDGES)
+}
+
+/// Test-only FA2 bridge override. Enabled by the `test-fa2-bridges`
+/// cargo feature; tests in downstream crates flip it on, register
+/// synthetic ticketers via `test_fa2_bridges::set`, and exercise the
+/// kernel's deposit / shield / unshield routing paths against them.
+/// The override is a thread-local so parallel test runners don't
+/// interfere with each other.
+///
+/// **Do not enable this feature in release builds.** A kernel compiled
+/// with the override active is one `set()` call away from accepting
+/// arbitrary FA2 ticketer addresses.
+#[cfg(feature = "test-fa2-bridges")]
+pub mod test_fa2_bridges {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static OVERRIDE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Replace the thread-local FA2 ticketer list. Pass an empty
+    /// slice to clear (after which compose_asset_registry falls back
+    /// to the compile-time const).
+    pub fn set<S: AsRef<str>>(ticketers: &[S]) {
+        OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = ticketers.iter().map(|s| s.as_ref().to_string()).collect();
+        });
+    }
+
+    /// Clear the override.
+    pub fn clear() {
+        OVERRIDE.with(|cell| cell.borrow_mut().clear());
+    }
+
+    /// Internal: snapshot of the current override. Public so the
+    /// `compose_asset_registry` body can read it without re-entering
+    /// the module; not meant for direct test use.
+    pub fn current() -> Vec<String> {
+        OVERRIDE.with(|cell| cell.borrow().clone())
+    }
 }
 
 /// Like `compose_asset_registry` but takes an explicit FA2 ticketer

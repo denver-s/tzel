@@ -1787,6 +1787,14 @@ fn host_shield_req_for_transition(
     let mut host_req = kernel_shield_req_to_host(req);
     if req.proof.proof_bytes == b"kernel-test-skip-verify" {
         host_req.proof = tzel_core::Proof::TrustMeBro;
+    } else if req.proof.proof_bytes == b"kernel-test-skip-verify-with-public-outputs" {
+        // Sibling of skip-verify that bypasses the cryptographic
+        // check but keeps the proof as `Proof::Stark` so prepare_*
+        // still reads `output_preimage`. Used by tests that need to
+        // exercise the public-output-driven kernel paths (asset_pub
+        // routing, recipient binding, etc.) without generating a
+        // real STARK. The `validate_transition_proof` early-return
+        // recognises both proof_bytes values.
     }
     host_req
 }
@@ -1805,6 +1813,14 @@ fn host_transfer_req_for_transition(
     let mut host_req = kernel_transfer_req_to_host(req);
     if req.proof.proof_bytes == b"kernel-test-skip-verify" {
         host_req.proof = tzel_core::Proof::TrustMeBro;
+    } else if req.proof.proof_bytes == b"kernel-test-skip-verify-with-public-outputs" {
+        // Sibling of skip-verify that bypasses the cryptographic
+        // check but keeps the proof as `Proof::Stark` so prepare_*
+        // still reads `output_preimage`. Used by tests that need to
+        // exercise the public-output-driven kernel paths (asset_pub
+        // routing, recipient binding, etc.) without generating a
+        // real STARK. The `validate_transition_proof` early-return
+        // recognises both proof_bytes values.
     }
     host_req
 }
@@ -1823,6 +1839,14 @@ fn host_unshield_req_for_transition(
     let mut host_req = kernel_unshield_req_to_host(req);
     if req.proof.proof_bytes == b"kernel-test-skip-verify" {
         host_req.proof = tzel_core::Proof::TrustMeBro;
+    } else if req.proof.proof_bytes == b"kernel-test-skip-verify-with-public-outputs" {
+        // Sibling of skip-verify that bypasses the cryptographic
+        // check but keeps the proof as `Proof::Stark` so prepare_*
+        // still reads `output_preimage`. Used by tests that need to
+        // exercise the public-output-driven kernel paths (asset_pub
+        // routing, recipient binding, etc.) without generating a
+        // real STARK. The `validate_transition_proof` early-return
+        // recognises both proof_bytes values.
     }
     host_req
 }
@@ -1843,7 +1867,9 @@ fn validate_transition_proof<H: Host>(
     proof: &tzel_core::kernel_wire::KernelStarkProof,
     circuit: tzel_core::CircuitKind,
 ) -> Result<(), String> {
-    if proof.proof_bytes == b"kernel-test-skip-verify" {
+    if proof.proof_bytes == b"kernel-test-skip-verify"
+        || proof.proof_bytes == b"kernel-test-skip-verify-with-public-outputs"
+    {
         return Ok(());
     }
     let verifier = load_verifier(host)?;
@@ -2131,9 +2157,10 @@ mod tests {
     };
     use tzel_core::kernel_wire::KernelDalChunkPointer;
     use tzel_core::{
-        commit, default_auth_domain, deposit_recipient_string, derive_account, derive_address, ASSET_TEZ,
+        commit, default_auth_domain, deposit_recipient_string, derive_account, derive_address,
+        derive_asset_id, ASSET_TEZ,
         derive_ask, derive_auth_pub_seed, derive_kem_keys, derive_nk_spend, derive_nk_tag,
-        derive_rcm, encrypt_note_deterministic, felt_tag, hash, hash_two,
+        derive_rcm, encrypt_note_deterministic, felt_tag, hash, hash_two, memo_ct_hash,
         kernel_wire::{
             encode_kernel_inbox_message, sign_kernel_bridge_config, sign_kernel_verifier_config,
             KernelBridgeConfig, KernelInboxMessage, KernelShieldReq, KernelStarkProof,
@@ -4494,12 +4521,348 @@ mod tests {
     }
 
     fn sample_commitment(address: &PaymentAddress, value: u64, rseed: F) -> F {
+        sample_commitment_with_asset(address, value, &ASSET_TEZ, rseed)
+    }
+
+    fn sample_commitment_with_asset(
+        address: &PaymentAddress,
+        value: u64,
+        asset_id: &F,
+        rseed: F,
+    ) -> F {
         commit(
             &address.d_j,
             value,
-            &ASSET_TEZ,
+            asset_id,
             &derive_rcm(&rseed),
             &owner_tag(&address.auth_root, &address.auth_pub_seed, &address.nk_tag),
         )
     }
+
+    // ─── End-to-end FA2 deposit → shield → unshield flow ─────────
+    //
+    // Exercises the full kernel pipeline for a non-tez asset with a
+    // synthetic FA2 ticketer registered via the test_fa2_bridges
+    // override. Uses the skip-verify proof magic so we don't need a
+    // real STARK against an FA2-aware Cairo circuit.
+
+    fn sample_fa2_ticketer() -> &'static str {
+        // Same address used in tests/multiasset_routing.rs's
+        // fa2_ticketer_a — keeps the synthetic FA2 identity stable
+        // across the kernel's internal and external test suites.
+        "KT1Jg4fj5wwnKHuW8aa9uDX6dRYBdjXhm2sJ"
+    }
+
+    fn encode_fa2_ticket_deposit_message(
+        sender_ticketer: &str,
+        recipient: &str,
+        amount: u64,
+    ) -> Vec<u8> {
+        // Mirrors encode_ticket_deposit_message but lets the caller
+        // override the ticketer (default helper hardcodes the tez
+        // ticketer). The token_id stays 0 and metadata stays None to
+        // match the FA2 bridge's ticket-content invariant.
+        let creator = TezosContract::from_b58check(sender_ticketer).unwrap();
+        let sender_contract = TezosContract::from_b58check(sender_ticketer).unwrap();
+        let sender = match sender_contract {
+            TezosContract::Originated(kt1) => kt1,
+            TezosContract::Implicit(_) => panic!("ticketer must be KT1"),
+        };
+        let payload = MichelsonPair(
+            MichelsonBytes(recipient.as_bytes().to_vec()),
+            FA2_1Ticket::new(
+                creator,
+                MichelsonPair(MichelsonInt::from(0i32), MichelsonOption(None)),
+                amount,
+            )
+            .unwrap(),
+        );
+        let transfer = TezosTransfer {
+            payload,
+            sender,
+            source: sample_l1_source(),
+            destination: sample_rollup_address(),
+        };
+        let mut bytes = Vec::new();
+        TezosInboxMessage::Internal(TezosInternalInboxMessage::Transfer(transfer))
+            .serialize(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    fn install_test_bridge_with_fa2(host: &mut MockHost, fa2: &[&str]) {
+        // Configure the durable bridge_config (tez ticketer) and
+        // override the FA2 list. Both run before any deposits or
+        // shields land.
+        install_test_bridge(host);
+        tzel_core::test_fa2_bridges::set(fa2);
+    }
+
+    /// Guard that clears the FA2 override on drop so a panic
+    /// mid-test doesn't leak state into the next test on the same
+    /// thread.
+    struct ClearFa2OnDrop;
+    impl Drop for ClearFa2OnDrop {
+        fn drop(&mut self) {
+            tzel_core::test_fa2_bridges::clear();
+        }
+    }
+
+    #[test]
+    fn end_to_end_fa2_deposit_shield_unshield_round_trip() {
+        let _g = ClearFa2OnDrop;
+        let mut host = MockHost::default();
+        install_test_bridge_with_fa2(&mut host, &[sample_fa2_ticketer()]);
+        install_test_verifier(&mut host);
+
+        let fa2_asset = derive_asset_id(sample_fa2_ticketer());
+        assert_ne!(fa2_asset, ASSET_TEZ, "FA2 asset_id must be distinct from tez");
+
+        let producer_fee = 1u64;
+        let v = 500u64;
+        let recipient_address = sample_payment_address();
+        let producer_rseed = sample_felt(0xA1);
+        // Producer-fee note STAYS tez even for FA2 shields — the
+        // liquidity argument (DAL slot publisher) doesn't care which
+        // asset the user moved.
+        let producer_enc = sample_encrypted_note(&recipient_address, producer_fee, producer_rseed, b"dal");
+        let producer_cm = sample_commitment(&recipient_address, producer_fee, producer_rseed);
+        let client_rseed = sample_felt(0xA2);
+        // Client (recipient) note is an FA2 note: commit must use
+        // the FA2 asset_id, and the kernel will read it from the
+        // proof's asset_new output (here mocked via skip-verify).
+        let client_enc = sample_encrypted_note(&recipient_address, v, client_rseed, b"fa2-shield");
+        let client_cm =
+            sample_commitment_with_asset(&recipient_address, v, &fa2_asset, client_rseed);
+        let blind = sample_felt(0xA3);
+        let pubkey_hash = tzel_core::deposit_pubkey_hash(
+            &default_auth_domain(),
+            &recipient_address.auth_root,
+            &recipient_address.auth_pub_seed,
+            &blind,
+        );
+
+        // ─── 1. FA2 deposit lands in the FA2 pool ─────────────
+        let deposit_amount = v + producer_fee + MIN_TX_FEE;
+        host.inputs.push_back(InputMessage {
+            level: 2,
+            id: 0,
+            payload: encode_fa2_ticket_deposit_message(
+                sample_fa2_ticketer(),
+                &deposit_recipient_string(&pubkey_hash),
+                deposit_amount,
+            ),
+        });
+        run_with_host(&mut host);
+        assert!(
+            matches!(read_last_result(&host).unwrap(), KernelResult::Deposit),
+            "FA2 deposit must be accepted by a kernel that registered the ticketer",
+        );
+
+        let fa2_pool_path = deposit_balance_path(&fa2_asset, &pubkey_hash);
+        let tez_pool_path = deposit_balance_path(&ASSET_TEZ, &pubkey_hash);
+        let fa2_balance_bytes = host
+            .read_store(&fa2_pool_path, 8)
+            .expect("FA2 pool must exist after FA2 deposit");
+        assert_eq!(
+            u64::from_le_bytes(fa2_balance_bytes.try_into().unwrap()),
+            deposit_amount,
+        );
+        assert!(
+            host.read_store(&tez_pool_path, 8).is_none(),
+            "tez pool must NOT be credited by an FA2 deposit",
+        );
+
+        // ─── 2. FA2 shield drains the FA2 pool ────────────────
+        let shield_req = KernelShieldReq {
+            asset_id: fa2_asset,
+            pubkey_hash,
+            fee: MIN_TX_FEE,
+            producer_fee,
+            v,
+            proof: sample_kernel_test_proof(),
+            client_cm,
+            client_enc,
+            producer_cm,
+            producer_enc,
+        };
+        let message = encode_external_kernel_message(&KernelInboxMessage::Shield(shield_req));
+        host.inputs.push_back(InputMessage {
+            level: 3,
+            id: 0,
+            payload: message,
+        });
+        run_with_host(&mut host);
+        match read_last_result(&host).unwrap() {
+            KernelResult::Shield(resp) => {
+                assert_eq!(resp.cm, client_cm);
+            }
+            other => panic!("FA2 shield must succeed against registered FA2 pool, got {:?}", other),
+        }
+        // FA2 pool fully drained, best-effort-deleted (empty value
+        // sits in the store).
+        let post_shield = host.read_store(&fa2_pool_path, 8).unwrap_or_default();
+        assert!(
+            post_shield.is_empty(),
+            "FA2 pool must be drained to empty after the shield",
+        );
+
+        // ─── 3. FA2 shield against the tez pool would have been
+        // rejected (pool doesn't exist); separately, a shield
+        // request whose asset_id is the FA2 asset but pool key
+        // didn't receive the deposit would also have been rejected.
+        // We verified the positive path above; the negative paths
+        // are covered by multiasset_routing.rs's deposit-routing
+        // tests.
+
+        // ─── 4. FA2 unshield emits an outbox burn message to the
+        // FA2 ticketer (not the tez ticketer). The proof's
+        // public-output preimage carries asset_pub = fa2_asset; the
+        // kernel's prepare_unshield_outbox looks it up in the
+        // registry and dispatches.
+        let exit_amount = 100u64;
+        // For a quick round-trip we have the shielded recipient
+        // (client_cm) become the sole input. The shield put a note
+        // in the tree at index 0; the kernel-test-skip-verify path
+        // accepts the unshield's request fields verbatim, so we
+        // construct a UnshieldReq whose nullifier corresponds to
+        // that input and route it through.
+        let nf = tzel_core::nullifier(
+            &derive_nk_spend(
+                &derive_account(&{
+                    let mut k = [0u8; 32];
+                    k[0] = 7;
+                    k
+                })
+                .nk,
+                &recipient_address.d_j,
+            ),
+            &client_cm,
+            0,
+        );
+        let l1_recipient = "tz1KqTpEZ7Yob7QbPE4Hy4Wo8fHG8LhKxZSx";
+        let fee_rseed = sample_felt(0xB1);
+        let fee_enc = sample_encrypted_note(&recipient_address, producer_fee, fee_rseed, b"dal");
+        let cm_fee = sample_commitment(&recipient_address, producer_fee, fee_rseed);
+        let change_rseed = sample_felt(0xB2);
+        let change_value = v - exit_amount;
+        let cm_change = sample_commitment_with_asset(
+            &recipient_address,
+            change_value,
+            &fa2_asset,
+            change_rseed,
+        );
+        let enc_change = sample_encrypted_note(
+            &recipient_address,
+            change_value,
+            change_rseed,
+            b"fa2-change",
+        );
+
+        // Resolve the post-shield root and build the public output
+        // preimage the kernel will read under skip-verify-with-
+        // public-outputs. Layout (Phase B + C unshield, n = 1):
+        //   [auth_domain, root, nf, v_pub, asset_pub, fee,
+        //    hash(recipient), cm_change, mh_change,
+        //    cm_change_2 (ZERO), mh_change_2 (ZERO),
+        //    cm_fee, mh_fee]
+        let actual_root = {
+            let state = DurableLedgerState::new(&mut host).unwrap();
+            state.read_felt(PATH_TREE_ROOT).unwrap().unwrap()
+        };
+        let enc_change_for_outputs = sample_encrypted_note(
+            &recipient_address,
+            change_value,
+            change_rseed,
+            b"fa2-change",
+        );
+        let mh_change_val = memo_ct_hash(&enc_change_for_outputs);
+        let mh_fee = memo_ct_hash(&fee_enc);
+        let unshield_public_outputs = vec![
+            default_auth_domain(),
+            actual_root,
+            nf,
+            tzel_core::u64_to_felt(exit_amount),
+            fa2_asset,
+            tzel_core::u64_to_felt(MIN_TX_FEE),
+            hash(l1_recipient.as_bytes()),
+            cm_change,
+            mh_change_val,
+            ZERO,
+            ZERO,
+            cm_fee,
+            mh_fee,
+        ];
+
+        let unshield_req = KernelUnshieldReq {
+            root: actual_root,
+            nullifiers: vec![nf],
+            v_pub: exit_amount,
+            fee: MIN_TX_FEE,
+            recipient: l1_recipient.into(),
+            cm_change,
+            enc_change: Some(enc_change),
+            cm_change_2: ZERO,
+            enc_change_2: None,
+            cm_fee,
+            enc_fee: fee_enc,
+            proof: KernelStarkProof {
+                // The sibling magic that keeps the proof as
+                // Proof::Stark so prepare_unshield reads
+                // output_preimage and extracts asset_pub = fa2_asset.
+                proof_bytes: b"kernel-test-skip-verify-with-public-outputs".to_vec(),
+                output_preimage: unshield_public_outputs,
+            },
+        };
+        let message = encode_external_kernel_message(&KernelInboxMessage::Unshield(unshield_req));
+        host.inputs.push_back(InputMessage {
+            level: 4,
+            id: 0,
+            payload: message,
+        });
+        let outputs_before = host.outputs.len();
+        run_with_host(&mut host);
+        match read_last_result(&host).unwrap() {
+            KernelResult::Unshield(_) => {}
+            other => panic!("FA2 unshield must succeed, got {:?}", other),
+        }
+        // An outbox burn message must have been emitted.
+        let outputs_after = host.outputs.len();
+        assert_eq!(
+            outputs_after - outputs_before,
+            1,
+            "exactly one outbox message should have been written",
+        );
+        // Decode the outbox and verify the burn was sent to the FA2
+        // ticketer (NOT the tez ticketer), with the FA2 ticketer as
+        // the ticket creator, and v_pub as the burn amount.
+        let outbox_bytes = &host.outputs[outputs_after - 1];
+        let (rest, decoded) =
+            TezosOutboxMessage::<MichelsonPair<MichelsonContract, FA2_1Ticket>>::nom_read(outbox_bytes)
+                .expect("FA2 outbox must decode under the same FA2_1Ticket schema as tez");
+        assert!(rest.is_empty());
+        let batch = match decoded {
+            TezosOutboxMessage::AtomicTransactionBatch(b) => b,
+        };
+        assert_eq!(batch.len(), 1, "outbox should hold a single burn op");
+        let tx = &batch[0];
+        assert_eq!(
+            tx.destination.to_b58check(),
+            sample_fa2_ticketer(),
+            "burn must dispatch to FA2 ticketer, not tez ticketer",
+        );
+        assert_ne!(
+            tx.destination.to_b58check(),
+            sample_ticketer(),
+            "burn must NOT dispatch to tez ticketer for an FA2 unshield",
+        );
+        assert_eq!(tx.entrypoint.name(), "burn");
+        assert_eq!(tx.parameters.0 .0.to_b58check(), l1_recipient);
+        assert_eq!(
+            tx.parameters.1.creator().0.to_b58check(),
+            sample_fa2_ticketer(),
+        );
+        assert_eq!(tx.parameters.1.amount_as::<u64, _>().unwrap(), exit_amount);
+    }
+
 }

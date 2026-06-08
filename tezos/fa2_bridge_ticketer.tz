@@ -127,7 +127,7 @@ code {
         # stack: fa2_ref_opt:option(contract)  fa2_arg:list  token_id:nat  amount:nat  receiver:bytes  rollup:address  storage
 
         IF_NONE
-          { PUSH string "fa2_bridge: invalid FA2 %transfer entrypoint" ; FAILWITH }
+          { PUSH string "fa2_bridge: mint: FA2 %transfer entrypoint not found at fa2_contract" ; FAILWITH }
           {} ;
         # stack: fa2_ref:contract  fa2_arg:list  token_id:nat  amount:nat  receiver:bytes  rollup:address  storage
 
@@ -348,7 +348,7 @@ code {
         # stack: fa2_ref_opt:option(contract)  fa2_arg:list  storage
 
         IF_NONE
-          { PUSH string "fa2_bridge: invalid FA2 %transfer entrypoint" ; FAILWITH }
+          { PUSH string "fa2_bridge: burn: FA2 %transfer entrypoint not found at fa2_contract" ; FAILWITH }
           {} ;
         # stack: fa2_ref:contract  fa2_arg:list  storage
 
