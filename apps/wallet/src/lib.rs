@@ -510,6 +510,10 @@ struct PendingSpend {
 /// signs the request with one of the recipient's auth-tree WOTS+ keys.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PendingDeposit {
+    /// L2 asset_id this deposit was made under. Defaults to ASSET_TEZ
+    /// so wallet fixtures from before multi-asset land parse cleanly.
+    #[serde(with = "hex_f", default)]
+    asset_id: F,
     /// Deposit pool key. The L1 recipient string is
     /// `deposit:<hex(pubkey_hash)>`.
     #[serde(with = "hex_f")]
@@ -2271,27 +2275,29 @@ impl<'a> RollupRpc<'a> {
         Ok(nullifiers)
     }
 
-    /// For each pending deposit pool, fetch the kernel-side current balance.
-    /// `None` (absent from the map) means the pool has never been credited
-    /// (or has been fully drained — implementations may garbage-collect).
+    /// For each pending deposit pool, fetch the kernel-side current
+    /// balance. The map is keyed by `(asset_id, pubkey_hash)` because
+    /// the same pubkey_hash may have separate FA2 + tez balances; the
+    /// caller must decide which it wants. `None` (absent from the
+    /// map) means the pool has never been credited (or was fully
+    /// drained — kernel garbage-collects empty entries).
     fn load_pool_balances(
         &self,
         pending: &[PendingDeposit],
-    ) -> Result<std::collections::HashMap<F, u64>, String> {
+    ) -> Result<std::collections::HashMap<(F, F), u64>, String> {
         let head = self.head_hash()?;
-        let mut map: std::collections::HashMap<F, u64> = std::collections::HashMap::new();
-        let mut seen: std::collections::HashSet<F> = std::collections::HashSet::new();
+        let mut map: std::collections::HashMap<(F, F), u64> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<(F, F)> = std::collections::HashSet::new();
         for p in pending {
-            if !seen.insert(p.pubkey_hash) {
+            let key = (p.asset_id, p.pubkey_hash);
+            if !seen.insert(key) {
                 continue;
             }
-            // E.6: poll the tez pool for now — the wallet's pending
-            // deposit tracker doesn't carry an asset_id yet. When the
-            // wallet starts emitting FA2 deposits, this needs to scan
-            // each (asset_id, pubkey_hash) pair the user might have
-            // funded.
-            if let Some(balance) = self.try_read_deposit_balance(&head, &ASSET_TEZ, &p.pubkey_hash)? {
-                map.insert(p.pubkey_hash, balance);
+            if let Some(balance) =
+                self.try_read_deposit_balance(&head, &p.asset_id, &p.pubkey_hash)?
+            {
+                map.insert(key, balance);
             }
         }
         Ok(map)
@@ -4973,16 +4979,25 @@ pub fn validate_detection_service_wallet(path: &str) -> Result<(), String> {
 }
 
 /// Fetch each tracked deposit pool's current balance from the demo
-/// HTTP ledger. Returns a sparse map; pools with no recorded balance
-/// (never credited or fully drained) are absent.
+/// HTTP ledger. Returns a sparse map keyed by `(asset_id, pubkey_hash)`;
+/// pools with no recorded balance are absent. The demo HTTP ledger's
+/// /deposits/balance endpoint is tez-only by construction (it backs a
+/// single-asset toy), so non-tez pending entries silently report
+/// absent. Production callers route through `load_pool_balances` on
+/// the real rollup-node HTTP path instead.
 fn fetch_pool_balances_http(
     ledger: &str,
     pending: &[PendingDeposit],
-) -> Result<std::collections::HashMap<F, u64>, String> {
-    let mut map: std::collections::HashMap<F, u64> = std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<F> = std::collections::HashSet::new();
+) -> Result<std::collections::HashMap<(F, F), u64>, String> {
+    let mut map: std::collections::HashMap<(F, F), u64> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<(F, F)> = std::collections::HashSet::new();
     for p in pending {
-        if !seen.insert(p.pubkey_hash) {
+        let key = (p.asset_id, p.pubkey_hash);
+        if !seen.insert(key) {
+            continue;
+        }
+        if p.asset_id != ASSET_TEZ {
+            // Demo HTTP ledger is tez-only; skip FA2 probes.
             continue;
         }
         let url = format!(
@@ -4997,7 +5012,7 @@ fn fetch_pool_balances_http(
         // Treat 404 / missing keys as "no pool yet"; surface other errors.
         match get_json::<BalanceBody>(&url) {
             Ok(body) => {
-                map.insert(p.pubkey_hash, body.balance);
+                map.insert(key, body.balance);
             }
             Err(e) if e.contains("404") => {}
             Err(e) => return Err(e),
@@ -5023,8 +5038,18 @@ fn cmd_scan(path: &str, ledger: &str) -> Result<(), String> {
     );
     if !summary.pool_balances.is_empty() {
         println!("Deposit pools:");
-        for (pubkey_hash, balance) in &summary.pool_balances {
-            println!("  pool {} = {} mutez", pubkey_hash_hex(pubkey_hash), balance);
+        for ((asset_id, pubkey_hash), balance) in &summary.pool_balances {
+            let label = if *asset_id == ASSET_TEZ {
+                "tez".to_string()
+            } else {
+                hex::encode(asset_id)
+            };
+            println!(
+                "  pool [{}] {} = {}",
+                label,
+                pubkey_hash_hex(pubkey_hash),
+                balance
+            );
         }
     }
     Ok(())
@@ -5034,8 +5059,9 @@ struct ScanSummary {
     found: usize,
     spent: usize,
     confirmed_pending: usize,
-    /// Snapshot of each known pool's current kernel-side balance.
-    pool_balances: std::collections::HashMap<F, u64>,
+    /// Snapshot of each known pool's current kernel-side balance,
+    /// keyed by `(asset_id, pubkey_hash)`.
+    pool_balances: std::collections::HashMap<(F, F), u64>,
     /// Number of `PendingDeposit` entries pruned because their
     /// `shielded_cm` was observed as a tree leaf this round.
     pruned_drained_pools: usize,
@@ -5045,7 +5071,7 @@ fn apply_scan_feed(
     w: &mut WalletFile,
     feed: &NotesFeedResp,
     nullifiers: impl IntoIterator<Item = F>,
-    pool_balances: &std::collections::HashMap<F, u64>,
+    pool_balances: &std::collections::HashMap<(F, F), u64>,
 ) -> ScanSummary {
     let mut found = 0usize;
     let mut known_notes: std::collections::HashSet<(usize, F)> =
@@ -5099,7 +5125,8 @@ fn apply_scan_feed(
     // metadata it needs.
     let before_pools = w.pending_deposits.len();
     w.pending_deposits.retain(|p| {
-        let drained_on_chain = pool_balances.get(&p.pubkey_hash).copied().unwrap_or(0) == 0;
+        let drained_on_chain =
+            pool_balances.get(&(p.asset_id, p.pubkey_hash)).copied().unwrap_or(0) == 0;
         let cm_observed = p
             .shielded_cm
             .as_ref()
@@ -6833,6 +6860,7 @@ mod tests {
         let recipient_cm = felt_tag(b"scan-feed-prune-cm");
 
         w.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             blind,
             address_index: 0,
@@ -6844,7 +6872,7 @@ mod tests {
 
         // First sync: kernel reports zero balance for the pool but
         // the recipient note is NOT yet in the feed → keep the entry.
-        let pool_balances_drained: std::collections::HashMap<F, u64> =
+        let pool_balances_drained: std::collections::HashMap<(F, F), u64> =
             std::collections::HashMap::new();
         let summary = apply_scan_feed(
             &mut w,
@@ -6898,6 +6926,7 @@ mod tests {
         let pubkey_hash = felt_tag(b"scan-feed-keep-pkh");
         let cm = felt_tag(b"scan-feed-keep-cm");
         w.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             blind: felt_tag(b"scan-feed-keep-blind"),
             address_index: 0,
@@ -6907,7 +6936,7 @@ mod tests {
             shielded_cm: Some(cm),
         });
         let mut pool_balances = std::collections::HashMap::new();
-        pool_balances.insert(pubkey_hash, 42u64);
+        pool_balances.insert((ASSET_TEZ, pubkey_hash), 42u64);
         let alien_nm = NoteMemo {
             index: 0,
             cm,
@@ -6955,6 +6984,7 @@ mod tests {
         // First shield: set shielded_cm to cm1.
         let cm1 = felt_tag(b"multi-stage-cm-1");
         w.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             blind: felt_tag(b"multi-stage-blind"),
             address_index: 0,
@@ -6966,7 +6996,7 @@ mod tests {
 
         // Sync 1: cm1 in feed, pool balance > 0 → keep.
         let mut pool_balances = std::collections::HashMap::new();
-        pool_balances.insert(pubkey_hash, 80_000u64);
+        pool_balances.insert((ASSET_TEZ, pubkey_hash), 80_000u64);
         let nm1 = NoteMemo {
             index: 0,
             cm: cm1,
@@ -7005,7 +7035,7 @@ mod tests {
 
         // Sync 2: cm2 in feed (cm1 is in past sync's notes only),
         // pool balance == 0 → must prune.
-        let pool_balances_drained: std::collections::HashMap<F, u64> =
+        let pool_balances_drained: std::collections::HashMap<(F, F), u64> =
             std::collections::HashMap::new();
         let nm2 = NoteMemo {
             index: 1,
@@ -7050,6 +7080,7 @@ mod tests {
         let new_nm = note_memo_for_wallet_address(&w, 0, 100_000, recipient_rseed, None);
         let cm = new_nm.cm;
         w.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             blind: felt_tag(b"two-syncs-blind"),
             address_index: 0,
@@ -7062,7 +7093,7 @@ mod tests {
         // Sync 1: cm in feed, pool still funded (residual or stale
         // read) → don't prune; cm gets absorbed into w.notes.
         let mut pool_balances_funded = std::collections::HashMap::new();
-        pool_balances_funded.insert(pubkey_hash, 50u64);
+        pool_balances_funded.insert((ASSET_TEZ, pubkey_hash), 50u64);
         let summary = apply_scan_feed(
             &mut w,
             &NotesFeedResp {
@@ -7079,7 +7110,7 @@ mod tests {
         // Sync 2: empty feed, pool drained. Without cumulative cm
         // tracking the entry would stay pinned. With it, w.notes
         // still contains cm → prune.
-        let pool_balances_drained: std::collections::HashMap<F, u64> =
+        let pool_balances_drained: std::collections::HashMap<(F, F), u64> =
             std::collections::HashMap::new();
         let summary = apply_scan_feed(
             &mut w,
@@ -7633,14 +7664,14 @@ fn cmd_user_balance(path: &str) -> Result<(), String> {
 /// observed in the tree).
 fn print_deposit_pool_summary(
     w: &WalletFile,
-    balances: &std::collections::HashMap<F, u64>,
+    balances: &std::collections::HashMap<(F, F), u64>,
 ) {
     let funded_count = balances.len();
     let total_funded: u64 = balances.values().sum();
     let mut drained_pending_scan = 0usize;
     let mut awaiting_credit = 0usize;
     for p in &w.pending_deposits {
-        if balances.contains_key(&p.pubkey_hash) {
+        if balances.contains_key(&(p.asset_id, p.pubkey_hash)) {
             continue;
         }
         if p.shielded_cm.is_some() {
@@ -7758,7 +7789,7 @@ fn cmd_rollup_sync(path: &str, profile: &WalletNetworkProfile) -> Result<(), Str
     let mut pools_awaiting_credit = 0usize;
     let mut pools_drained_pending_scan = 0usize;
     for p in &w.pending_deposits {
-        if summary.pool_balances.contains_key(&p.pubkey_hash) {
+        if summary.pool_balances.contains_key(&(p.asset_id, p.pubkey_hash)) {
             continue;
         }
         if p.shielded_cm.is_some() {
@@ -7927,6 +7958,12 @@ fn cmd_bridge_deposit(
     // successful L1 deposit (which would strand the pool, since only the
     // wallet that knows the blind can recompute pubkey_hash and shield).
     let pending = PendingDeposit {
+        // cmd_bridge_deposit is the tez-deposit entrypoint; FA2
+        // deposits go through their own ticketer (and the wallet
+        // currently constructs them off-band via the L1-signer flow,
+        // not through this command), so the pool key here is fixed
+        // to tez.
+        asset_id: ASSET_TEZ,
         pubkey_hash,
         blind,
         address_index,
@@ -8058,11 +8095,23 @@ fn cmd_recover_deposits(
     wallet.materialize_addresses()?;
     save_wallet(path, &wallet)?;
 
-    let known_pubkey_hashes: std::collections::HashSet<F> = wallet
+    let known_pools: std::collections::HashSet<(F, F)> = wallet
         .pending_deposits
         .iter()
-        .map(|p| p.pubkey_hash)
+        .map(|p| (p.asset_id, p.pubkey_hash))
         .collect();
+
+    // Recovery scans every registered asset's pool keyed by every
+    // candidate pubkey_hash. ASSET_TEZ is always first; any FA2
+    // entries from COMPILE_TIME_FA2_BRIDGES follow. The (i, j) grid
+    // is the same as before — derive_deposit_blind doesn't depend on
+    // asset_id — but each candidate pubkey_hash is now probed against
+    // every registered asset, not just tez.
+    let mut scan_assets: Vec<F> = Vec::with_capacity(1 + COMPILE_TIME_FA2_BRIDGES.len());
+    scan_assets.push(ASSET_TEZ);
+    for ticketer in COMPILE_TIME_FA2_BRIDGES {
+        scan_assets.push(derive_asset_id(ticketer));
+    }
 
     let mut recovered = 0usize;
     let mut max_nonce_seen: Option<u64> = None;
@@ -8083,39 +8132,45 @@ fn cmd_recover_deposits(
                 &addr.auth_pub_seed,
                 &blind,
             );
-            if known_pubkey_hashes.contains(&pubkey_hash) {
-                continue;
+            for asset_id in &scan_assets {
+                if known_pools.contains(&(*asset_id, pubkey_hash)) {
+                    continue;
+                }
+                let balance =
+                    rollup.try_read_deposit_balance(&head_hash, asset_id, &pubkey_hash)?;
+                let Some(amount) = balance else { continue };
+                if amount == 0 {
+                    continue;
+                }
+                let asset_label = if *asset_id == ASSET_TEZ {
+                    "tez".to_string()
+                } else {
+                    short(asset_id)
+                };
+                eprintln!(
+                    "  recovered: address_index={} deposit_nonce={} asset={} balance={} pubkey_hash={}",
+                    i,
+                    j,
+                    asset_label,
+                    amount,
+                    pubkey_hash_hex(&pubkey_hash),
+                );
+                wallet.pending_deposits.push(PendingDeposit {
+                    asset_id: *asset_id,
+                    pubkey_hash,
+                    blind,
+                    address_index: i,
+                    auth_domain,
+                    amount,
+                    operation_hash: None,
+                    shielded_cm: None,
+                });
+                max_nonce_seen = Some(match max_nonce_seen {
+                    Some(prev) => prev.max(j),
+                    None => j,
+                });
+                recovered += 1;
             }
-            // E.6: deposit recovery currently scans the tez pool only.
-            // FA2 recovery will require iterating known asset_ids;
-            // tracked as a wallet-side TODO once a real FA2 ticketer
-            // is deployed (see fa2_bridge_ticketer.tz).
-            let balance = rollup.try_read_deposit_balance(&head_hash, &ASSET_TEZ, &pubkey_hash)?;
-            let Some(amount) = balance else { continue };
-            if amount == 0 {
-                continue;
-            }
-            eprintln!(
-                "  recovered: address_index={} deposit_nonce={} balance={} pubkey_hash={}",
-                i,
-                j,
-                amount,
-                pubkey_hash_hex(&pubkey_hash),
-            );
-            wallet.pending_deposits.push(PendingDeposit {
-                pubkey_hash,
-                blind,
-                address_index: i,
-                auth_domain,
-                amount,
-                operation_hash: None,
-                shielded_cm: None,
-            });
-            max_nonce_seen = Some(match max_nonce_seen {
-                Some(prev) => prev.max(j),
-                None => j,
-            });
-            recovered += 1;
         }
     }
 
@@ -11355,6 +11410,7 @@ mod network_profile_tests {
             &blind,
         );
         wallet.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash: pkh,
             blind,
             address_index: 0,
@@ -11787,6 +11843,7 @@ mod network_profile_tests {
         ]));
         let profile = super::tests::rollup_profile_for_url(&base_url);
         let pending = vec![PendingDeposit {
+            asset_id: ASSET_TEZ,
             pubkey_hash,
             blind: felt_tag(b"pool-balance-test-blind"),
             address_index: 0,
@@ -11800,7 +11857,7 @@ mod network_profile_tests {
             .load_pool_balances(&pending)
             .expect("load_pool_balances should succeed");
 
-        assert_eq!(balances.get(&pubkey_hash), Some(&amount));
+        assert_eq!(balances.get(&(ASSET_TEZ, pubkey_hash)), Some(&amount));
         assert_eq!(balances.len(), 1);
     }
 
