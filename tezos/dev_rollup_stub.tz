@@ -1,0 +1,15 @@
+# dev_rollup_stub.tz — minimal KT1 that stands in for a Tezos smart
+# rollup during shadownet round-trip testing of
+# fa2_bridge_ticketer.tz. It accepts the bridge's deposit payload
+# `(bytes %receiver, ticket (pair nat (option bytes)))` and discards
+# it. A real rollup queues the ticket for L2 processing; the stub
+# just confirms the bridge ticketer's TRANSFER_TOKENS dispatch
+# arrives at a contract whose entrypoint type matches.
+
+parameter (pair (bytes %receiver) (ticket %ticket (pair nat (option bytes)))) ;
+storage unit ;
+code
+  { DROP ;
+    UNIT ;
+    NIL operation ;
+    PAIR }
