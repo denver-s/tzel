@@ -19,6 +19,8 @@ bob.json
 mutants.out*/
 aws_creds
 .env
+.gh_token
+gh_token
 third_party/patched-git/
 
 # Generated LaTeX artifacts
