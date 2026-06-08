@@ -45,8 +45,8 @@ storage
     (address %fa2_contract)
     (nat     %token_id)) ;
 
-code {
-    # ENTRY
+code
+  { # ENTRY
     # stack: input:pair(parameter, storage)
     UNPAIR ;
     # stack: parameter:or(mint, burn)  storage:(address fa2_contract, nat token_id)
@@ -176,7 +176,12 @@ code {
         DIG 2 ;
         # stack: receiver:bytes  ticket  fa2_op:operation  rollup:address  storage
 
-        SWAP ;
+        # PAIR pops top (receiver) and second (ticket) and builds
+        # pair(top, second) = (receiver, ticket), matching the
+        # rollup's (bytes, ticket) deposit-payload schema. Earlier
+        # drafts had an extra SWAP here that produced (ticket,
+        # receiver) — a type mismatch the octez-client typecheck
+        # caught the moment it was given access.
         PAIR ;
         # stack: deposit:(bytes receiver, ticket)  fa2_op:operation  rollup:address  storage
 
@@ -326,7 +331,9 @@ code {
         SELF_ADDRESS ;
         # stack: self:address  txs:list  storage
 
-        SWAP ;
+        # PAIR top-then-second: pair(self, txs) = (from_, txs). The
+        # earlier SWAP at this site was a typo — caught by the
+        # typechecker.
         PAIR ;
         # stack: from_txs:(address from_, list txs)  storage
 
@@ -369,4 +376,4 @@ code {
         PAIR ;
         # stack: (ops, storage)
       }
-}
+  }

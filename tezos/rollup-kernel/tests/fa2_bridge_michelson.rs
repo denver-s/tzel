@@ -438,6 +438,94 @@ fn no_storage_mutation_path() {
     );
 }
 
+/// Real-typechecker run via octez-client mockup, when available.
+/// Auto-skipped (with a clear log line) when `octez-client` isn't on
+/// PATH. This is the ground-truth test that catches every bug the
+/// structural suite above can't — e.g. a transposed SWAP/PAIR that
+/// produces (ticket, bytes) where the rollup expects (bytes,
+/// ticket), or a misalignment that breaks the Michelson parser.
+///
+/// To run locally: install the octez-client static binary into your
+/// PATH (gitlab.com/tezos/tezos releases → static binaries →
+/// x86_64-octez-client), then `cargo test --test
+/// fa2_bridge_michelson fa2_bridge_typechecks_under_octez_client`.
+///
+/// In containers where octez-client is preinstalled (e.g. our
+/// development container at /home/coder/bin/octez-client), the test
+/// runs automatically.
+#[test]
+fn fa2_bridge_typechecks_under_octez_client() {
+    use std::process::Command;
+
+    // Locate octez-client. Try PATH first, then a couple of common
+    // install paths.
+    let bin = ["octez-client", "/home/coder/bin/octez-client"]
+        .iter()
+        .find(|p| Command::new(p).arg("--version").output().is_ok())
+        .copied();
+    let Some(bin) = bin else {
+        eprintln!(
+            "SKIP fa2_bridge_typechecks_under_octez_client: octez-client \
+             not on PATH. Install from gitlab.com/tezos/tezos releases \
+             (x86_64-octez-client static binary) to enable.",
+        );
+        return;
+    };
+
+    // Spin up (or reuse) a mockup base dir. Mockup mode lets us
+    // typecheck without a running node.
+    let base_dir = std::path::PathBuf::from("/tmp/tzel-fa2-bridge-typecheck");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).expect("create mockup base dir");
+
+    let protocol = "PtSeouLouXkxhg39oWzjxDWaCydNfR3RxCUrNe4Q9Ro8BTehcbh";
+    let setup = Command::new(bin)
+        .args([
+            "--base-dir",
+            base_dir.to_str().unwrap(),
+            "--mode",
+            "mockup",
+            "--protocol",
+            protocol,
+            "create",
+            "mockup",
+        ])
+        .output()
+        .expect("octez-client create mockup");
+    assert!(
+        setup.status.success(),
+        "octez-client mockup setup failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&setup.stdout),
+        String::from_utf8_lossy(&setup.stderr),
+    );
+
+    let mut contract = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    contract.push(CONTRACT_PATH_REL);
+    let result = Command::new(bin)
+        .args([
+            "--base-dir",
+            base_dir.to_str().unwrap(),
+            "--mode",
+            "mockup",
+            "--protocol",
+            protocol,
+            "typecheck",
+            "script",
+            contract.to_str().unwrap(),
+        ])
+        .output()
+        .expect("octez-client typecheck script");
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success() && (stdout.contains("Well typed") || stderr.contains("Well typed")),
+        "fa2_bridge_ticketer.tz does NOT typecheck.\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr,
+    );
+}
+
 #[test]
 fn header_documents_the_invariants_the_kernel_relies_on() {
     // The header comment carries documentation that the rest of the
