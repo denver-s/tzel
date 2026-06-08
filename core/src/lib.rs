@@ -170,6 +170,15 @@ pub mod test_fa2_bridges {
 /// Like `compose_asset_registry` but takes an explicit FA2 ticketer
 /// list — letting tests and tooling exercise the routing helpers
 /// without having to mutate the kernel-binary const.
+///
+/// Defense-in-depth: skips any FA2 ticketer string that equals the
+/// `tez_ticketer`. The registry's `find`-based lookups return the
+/// first match, so if the tez ticketer appeared again as an FA2
+/// entry, FA2 deposits at that address would silently route to the
+/// tez pool. Skipping (rather than erroring) keeps the function
+/// total — kernel binaries with a misconfigured const fall back to
+/// the safe "this address only serves tez" interpretation rather
+/// than refusing to boot.
 pub fn compose_asset_registry_with<S: AsRef<str>>(
     tez_ticketer: &str,
     fa2_ticketers: &[S],
@@ -177,6 +186,12 @@ pub fn compose_asset_registry_with<S: AsRef<str>>(
     let mut entries = Vec::with_capacity(1 + fa2_ticketers.len());
     entries.push(AssetEntry::tez(tez_ticketer.to_string()));
     for fa2 in fa2_ticketers {
+        if fa2.as_ref() == tez_ticketer {
+            // Skip: this address is already the tez ticketer.
+            // Including it as FA2 would expose first-match lookup
+            // ordering as a security property.
+            continue;
+        }
         entries.push(AssetEntry::fa2(fa2.as_ref().to_string()));
     }
     entries
@@ -7122,33 +7137,38 @@ mod tests {
 
     /// Edge case: tez ticketer also appears in the FA2 list. The
     /// composed registry has two entries for the same ticketer
-    /// string but DISTINCT asset_ids — one ASSET_TEZ (entry 0) and
-    /// one derive_asset_id(tez_addr). asset_for_ticketer's linear
-    /// scan returns the FIRST match (tez), and ticketer_for_asset
-    /// for either asset_id resolves to the same ticketer address.
-    ///
-    /// This isn't a vulnerability — deposits from the tez ticketer
-    /// always credit the tez pool, and an unshield with asset_pub =
-    /// derived_asset_id(tez_addr) would dispatch the burn to the
-    /// same ticketer that's serving tez. The configuration is
-    /// nonsensical to deploy, but it doesn't enable any cross-
-    /// asset attack.
+    /// Phase E.5 defense-in-depth: `compose_asset_registry_with`
+    /// silently SKIPS any FA2 ticketer that equals the tez ticketer
+    /// (rather than including it as a duplicate entry whose
+    /// `asset_id` would derive to a value distinct from ASSET_TEZ).
+    /// Earlier behaviour created a registry where the same ticketer
+    /// string appeared twice with DIFFERENT asset_ids and the
+    /// `find`-based lookups silently masked the FA2 entry behind
+    /// the tez entry — making first-match ordering a security
+    /// property. The new behaviour makes that misconfiguration
+    /// un-shootable.
     #[test]
-    fn test_tez_ticketer_in_fa2_list_does_not_leak_pools() {
+    fn test_tez_ticketer_in_fa2_list_is_skipped_not_duplicated() {
         let tez = "KT1Tez";
         let registry = compose_asset_registry_with(tez, &[tez]);
-        // Two entries: tez and "FA2 with same address".
-        assert_eq!(registry.len(), 2);
+        assert_eq!(
+            registry.len(),
+            1,
+            "duplicate tez address in FA2 list must be skipped, leaving only the tez entry",
+        );
         assert_eq!(registry[0].asset_id, ASSET_TEZ);
-        assert_eq!(registry[1].asset_id, derive_asset_id(tez));
-        assert_ne!(registry[0].asset_id, registry[1].asset_id);
+        assert_eq!(registry[0].ticketer, tez);
 
-        // asset_for_ticketer returns the FIRST match (tez asset_id).
+        // asset_for_ticketer resolves the tez address to ASSET_TEZ.
         assert_eq!(asset_for_ticketer(&registry, tez), Some(&ASSET_TEZ));
-        // ticketer_for_asset for either asset_id resolves to the
-        // same string.
+        // ticketer_for_asset for the would-be FA2-derived asset_id
+        // now returns None — the address is bound to tez only.
         assert_eq!(ticketer_for_asset(&registry, &ASSET_TEZ), Some(tez));
-        assert_eq!(ticketer_for_asset(&registry, &derive_asset_id(tez)), Some(tez));
+        assert_eq!(
+            ticketer_for_asset(&registry, &derive_asset_id(tez)),
+            None,
+            "skipped FA2 entry must not be reachable via its derived asset_id",
+        );
     }
 
     /// Edge case: duplicate FA2 ticketers in the list. The composed

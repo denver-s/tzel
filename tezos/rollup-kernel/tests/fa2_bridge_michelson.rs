@@ -311,6 +311,7 @@ fn every_failwith_message_is_unique_and_prefixed() {
         "fa2_bridge: unexpected ticket creator",
         "fa2_bridge: ticket metadata must be None",
         "fa2_bridge: ticket token_id must be 0",
+        "fa2_bridge: must not attach tez",
     ];
     for required in required_messages {
         assert!(
@@ -377,21 +378,37 @@ fn stack_annotations_are_dense() {
 }
 
 #[test]
-fn no_amount_handling_on_mint() {
-    // The FA2 mint must NOT use AMOUNT (the implicit mutez value) the
-    // way the tez ticketer does — FA2 tokens cannot be carried by a
-    // mutez transfer. Pulling AMOUNT here would silently allow
-    // someone to mint an L2 FA2 ticket by sending tez (free FA2!).
+fn no_mutez_amount_in_accounting_path() {
+    // The FA2 mint amount MUST come from the %amount nat parameter,
+    // not from AMOUNT (implicit mutez). Pulling AMOUNT for accounting
+    // here would silently allow someone to mint an L2 FA2 ticket by
+    // sending tez (free FA2!).
+    //
+    // Phase E.5 (Michelson nit #1 fix): AMOUNT *is* now used by the
+    // contract — but only at the top of `code` to enforce that the
+    // caller attached NO tez to the call (any attached tez would
+    // accumulate in the ticketer with no recovery path). The
+    // accounting-path guard below is the stricter check: no mutez
+    // arithmetic anywhere (no EDIV/MUL on mutez), and the L2 ticket
+    // amount comes from the nat parameter.
     let instr = instructions_only(&contract_source());
-    // The tez ticketer has `AMOUNT ; PUSH mutez 1 ; SWAP ; EDIV` —
-    // none of those mutez conversions should appear here.
-    assert!(
-        !instr.contains(" AMOUNT "),
-        "FA2 ticketer must not use AMOUNT (mutez sent); mint amount comes from the %amount parameter",
-    );
     assert!(
         !instr.contains("EDIV"),
         "FA2 ticketer must not EDIV mutez (tez ticketer pattern); FA2 mint takes amount as nat parameter",
+    );
+    assert!(
+        !instr.contains(" MUL "),
+        "FA2 ticketer must not MUL mutez — accounting goes through the %amount nat parameter",
+    );
+    // The only AMOUNT use is the top-of-`code` zero-check. Verify
+    // that pattern is present so we know the AMOUNT instruction
+    // isn't being repurposed for something else.
+    let src = contract_source();
+    assert!(
+        src.contains("AMOUNT ;")
+            && src.contains("PUSH mutez 0 ;")
+            && src.contains("\"fa2_bridge: must not attach tez\""),
+        "AMOUNT must be used solely to enforce that no tez was attached to the call",
     );
 }
 

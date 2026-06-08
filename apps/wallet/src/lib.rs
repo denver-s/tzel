@@ -7304,6 +7304,134 @@ mod tests {
         assert!(w.pending_deposits.is_empty());
     }
 
+    /// Phase E.5 regression for W3: the PendingDeposit selector
+    /// must filter by `(asset_id, pubkey_hash)`, not just
+    /// `pubkey_hash`. After `cmd_recover_deposits`, the same
+    /// pubkey_hash can correspond to two PendingDeposits (one tez,
+    /// one FA2 — see the bug #2 fix which requires both pools at the
+    /// same key). Without the asset filter the selector silently
+    /// returns the first match, which is asset-correct today only
+    /// because the returned fields are asset-independent — a future
+    /// field that becomes asset-dependent would silently regress.
+    #[test]
+    fn test_select_pending_deposit_by_asset_and_pubkey_hash_distinguishes_assets() {
+        let mut w = test_wallet(1);
+        let pubkey_hash = felt_tag(b"select-pending-pkh");
+        let blind = felt_tag(b"select-pending-blind");
+        let auth_domain = felt_tag(b"select-pending-domain");
+        let fa2_asset = derive_asset_id("KT1SelectPendingFA2");
+        assert_ne!(fa2_asset, ASSET_TEZ);
+
+        // Push a tez pool first, then an FA2 pool at the same
+        // pubkey_hash. Without asset filtering the selector would
+        // always return the tez entry.
+        w.pending_deposits.push(PendingDeposit {
+            asset_id: ASSET_TEZ,
+            pubkey_hash,
+            blind,
+            address_index: 0,
+            auth_domain,
+            amount: 100,
+            operation_hash: Some("opTez".into()),
+            shielded_cm: None,
+        });
+        w.pending_deposits.push(PendingDeposit {
+            asset_id: fa2_asset,
+            pubkey_hash,
+            blind,
+            address_index: 0,
+            auth_domain,
+            amount: 200,
+            operation_hash: Some("opFA2".into()),
+            shielded_cm: None,
+        });
+
+        let tez_match =
+            select_pending_deposit_by_asset_and_pubkey_hash(&w, &ASSET_TEZ, &pubkey_hash)
+                .expect("tez pool must be found");
+        assert_eq!(tez_match.asset_id, ASSET_TEZ);
+        assert_eq!(tez_match.amount, 100);
+
+        let fa2_match =
+            select_pending_deposit_by_asset_and_pubkey_hash(&w, &fa2_asset, &pubkey_hash)
+                .expect("FA2 pool must be found");
+        assert_eq!(fa2_match.asset_id, fa2_asset);
+        assert_eq!(fa2_match.amount, 200);
+
+        // A third asset for the same pubkey_hash that the wallet
+        // doesn't track must produce a clear error, not silently
+        // resolve to one of the others.
+        let third_asset = derive_asset_id("KT1SelectPendingThird");
+        let err = select_pending_deposit_by_asset_and_pubkey_hash(&w, &third_asset, &pubkey_hash)
+            .unwrap_err();
+        assert!(
+            err.contains("is not tracked"),
+            "error message must indicate the pool isn't tracked: {}",
+            err,
+        );
+    }
+
+    /// Phase E.5 regression for W4: stamping `shielded_cm` after a
+    /// successful shield must only touch PendingDeposits whose
+    /// `(asset_id, pubkey_hash)` matches the shield request. Without
+    /// the asset filter, an FA2 shield would also stamp the tez
+    /// PendingDeposit at the same pubkey_hash (used as the
+    /// producer-fee tez pool — see bug #2 fix), and `apply_scan_feed`
+    /// would later prune the still-funded tez record on observing
+    /// the FA2 shield's cm in the feed.
+    #[test]
+    fn test_shielded_cm_stamping_isolates_assets_at_same_pubkey_hash() {
+        // Reproduce the bug-prone state: tez + FA2 PendingDeposits at
+        // the same pubkey_hash. Then apply the shield's stamping
+        // filter manually and assert only the FA2 record gets
+        // stamped.
+        let pubkey_hash = felt_tag(b"stamp-isolation-pkh");
+        let fa2_asset = derive_asset_id("KT1StampIsolationFA2");
+        let mut deposits = vec![
+            PendingDeposit {
+                asset_id: ASSET_TEZ,
+                pubkey_hash,
+                blind: felt_tag(b"stamp-tez-blind"),
+                address_index: 0,
+                auth_domain: felt_tag(b"stamp-domain"),
+                amount: 50,
+                operation_hash: None,
+                shielded_cm: None,
+            },
+            PendingDeposit {
+                asset_id: fa2_asset,
+                pubkey_hash,
+                blind: felt_tag(b"stamp-fa2-blind"),
+                address_index: 0,
+                auth_domain: felt_tag(b"stamp-domain"),
+                amount: 100,
+                operation_hash: None,
+                shielded_cm: None,
+            },
+        ];
+
+        // This is the exact filter expression cmd_shield_rollup uses
+        // after submitting an FA2 shield to the operator.
+        let asset_id = fa2_asset;
+        let cm = felt_tag(b"stamp-shield-cm");
+        for p in deposits
+            .iter_mut()
+            .filter(|p| p.asset_id == asset_id && p.pubkey_hash == pubkey_hash)
+        {
+            p.shielded_cm = Some(cm);
+        }
+
+        assert_eq!(
+            deposits[0].shielded_cm, None,
+            "tez PendingDeposit at same pubkey_hash must NOT be stamped by an FA2 shield",
+        );
+        assert_eq!(
+            deposits[1].shielded_cm,
+            Some(cm),
+            "FA2 PendingDeposit must be stamped with the shield's cm",
+        );
+    }
+
     #[test]
     fn test_apply_scan_feed_keeps_funded_pool_even_when_cm_observed() {
         // Defensive: a pool with a positive kernel-side balance is
@@ -8226,18 +8354,29 @@ fn cmd_rollup_sync_watch(
     }
 }
 
-fn select_pending_deposit_by_pubkey_hash<'a>(
+/// Pick a `PendingDeposit` matching both `asset_id` AND `pubkey_hash`.
+/// After `cmd_recover_deposits` can produce multiple PendingDeposits
+/// with the same pubkey_hash (one per asset the user deposited into
+/// the same auth tree); without filtering by asset_id the wallet
+/// would silently pick the first one — fine today because the
+/// returned fields (blind, address_index, auth_domain) are asset-
+/// independent, but a future field that becomes asset-dependent
+/// would silently regress. Filtering by `(asset_id, pubkey_hash)`
+/// closes that door and improves error diagnostics.
+fn select_pending_deposit_by_asset_and_pubkey_hash<'a>(
     wallet: &'a WalletFile,
+    asset_id: &F,
     pubkey_hash: &F,
 ) -> Result<&'a PendingDeposit, String> {
     wallet
         .pending_deposits
         .iter()
-        .find(|p| &p.pubkey_hash == pubkey_hash)
+        .find(|p| &p.asset_id == asset_id && &p.pubkey_hash == pubkey_hash)
         .ok_or_else(|| {
             format!(
-                "deposit pool {} is not tracked by this wallet",
-                hex::encode(pubkey_hash)
+                "deposit pool (asset_id {}, pubkey_hash {}) is not tracked by this wallet",
+                hex::encode(asset_id),
+                hex::encode(pubkey_hash),
             )
         })
 }
@@ -9483,7 +9622,7 @@ fn cmd_shield_rollup(
     }
 
     let mut w = load_wallet(path)?;
-    let pending_match = select_pending_deposit_by_pubkey_hash(&w, &pubkey_hash)?;
+    let pending_match = select_pending_deposit_by_asset_and_pubkey_hash(&w, &asset_id, &pubkey_hash)?;
     let blind = pending_match.blind;
     let address_index = pending_match.address_index;
     let stored_auth_domain = pending_match.auth_domain;
@@ -9644,18 +9783,27 @@ fn cmd_shield_rollup(
     });
     let submission = rollup.submit_kernel_message(&kernel_msg)?;
     emit_operator_done_event(&submission);
-    // Mark every local PendingDeposit for this pool as consumed by
-    // *this* shield's recipient cm — overwriting any previous cm
-    // recorded against the same pool. Multi-stage drains are
-    // legitimate (the core ledger explicitly supports two distinct
-    // shields draining one pool), so the latest cm is the one sync
-    // most likely sees in the next feed; older cms are still tracked
-    // cumulatively in `w.notes`, so the prune predicate in
-    // `apply_scan_feed` accepts an observation of any prior cm too.
+    // Mark every local PendingDeposit FOR THIS ASSET AND POOL as
+    // consumed by *this* shield's recipient cm — overwriting any
+    // previous cm recorded against the same (asset_id, pubkey_hash).
+    // Multi-stage drains are legitimate (the core ledger explicitly
+    // supports two distinct shields draining one pool), so the latest
+    // cm is the one sync most likely sees in the next feed; older cms
+    // are still tracked cumulatively in `w.notes`, so the prune
+    // predicate in `apply_scan_feed` accepts an observation of any
+    // prior cm too.
+    //
+    // Filtering by asset_id is load-bearing under multi-asset: an
+    // FA2 shield and a tez shield can both target the same
+    // pubkey_hash (the producer-fee tez pool sits at the same key as
+    // the FA2 pool, see bug #2 fix). Stamping the tez PendingDeposit
+    // with the FA2 shield's cm would falsely mark the tez pool as
+    // drained and cause the prune predicate to evict a still-funded
+    // tez record.
     for p in w
         .pending_deposits
         .iter_mut()
-        .filter(|p| p.pubkey_hash == pubkey_hash)
+        .filter(|p| p.asset_id == asset_id && p.pubkey_hash == pubkey_hash)
     {
         p.shielded_cm = Some(note_recipient.cm);
     }

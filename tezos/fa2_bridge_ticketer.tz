@@ -62,6 +62,27 @@ storage
 code
   { # ENTRY
     # stack: input:pair(parameter, storage)
+
+    # ----- Reject tez attached to either entrypoint. The FA2 bridge
+    # ----- moves FA2 tokens, not tez — any attached mutez would
+    # ----- accumulate in this contract's balance with no recovery
+    # ----- path (there is no admin or withdrawal entrypoint, by
+    # ----- design). FAILWITH instead of accepting and locking funds.
+    AMOUNT ;
+    # stack: tx_amount:mutez  input
+
+    PUSH mutez 0 ;
+    # stack: 0:mutez  tx_amount  input
+
+    COMPARE ;
+    # stack: cmp:int  input
+
+    EQ ;
+    # stack: ok:bool  input
+
+    IF {} { PUSH string "fa2_bridge: must not attach tez" ; FAILWITH } ;
+    # stack: input
+
     UNPAIR ;
     # stack: parameter:or(mint, burn)  storage:(address fa2_contract, nat token_id)
 
