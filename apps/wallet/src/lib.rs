@@ -955,17 +955,25 @@ impl WalletFile {
         }
     }
 
-    /// Select notes to cover at least `amount`. Returns indices into self.notes.
-    fn select_notes(&self, amount: u64) -> Result<Vec<usize>, String> {
+    /// Select notes of `asset_id` to cover at least `amount`. Returns
+    /// indices into self.notes. Largest-first packing. Only notes
+    /// whose nullifier is not in a pending spend are considered.
+    fn select_notes_of_asset(
+        &self,
+        asset_id: &F,
+        amount: u64,
+    ) -> Result<Vec<usize>, String> {
         let pending = self.pending_nullifier_set();
         let mut indexed: Vec<(usize, u64)> = self
             .notes
             .iter()
             .enumerate()
-            .filter(|(_, note)| !pending.contains(&note_nullifier(note)))
+            .filter(|(_, note)| {
+                &note.asset_id == asset_id && !pending.contains(&note_nullifier(note))
+            })
             .map(|(i, n)| (i, n.v))
             .collect();
-        indexed.sort_by(|a, b| b.1.cmp(&a.1)); // largest first
+        indexed.sort_by(|a, b| b.1.cmp(&a.1));
         let mut sum = 0u128;
         let mut selected = vec![];
         for (i, v) in indexed {
@@ -975,12 +983,34 @@ impl WalletFile {
                 return Ok(selected);
             }
         }
+        let available: u128 = self
+            .notes
+            .iter()
+            .filter(|n| &n.asset_id == asset_id && !pending.contains(&note_nullifier(n)))
+            .map(|n| n.v as u128)
+            .sum();
+        let pending_amt: u128 = self
+            .notes
+            .iter()
+            .filter(|n| &n.asset_id == asset_id && pending.contains(&note_nullifier(n)))
+            .map(|n| n.v as u128)
+            .sum();
+        let label = if asset_id == &ASSET_TEZ {
+            "tez".to_string()
+        } else {
+            hex::encode(asset_id)
+        };
         Err(format!(
-            "insufficient funds: have {} available ({} pending) need {}",
-            self.available_balance(),
-            self.pending_outgoing_balance(),
-            amount
+            "insufficient {} funds: have {} available ({} pending) need {}",
+            label, available, pending_amt, amount
         ))
+    }
+
+    /// Tez-only convenience for callers that haven't been generalised
+    /// to multi-asset yet. New code should call `select_notes_of_asset`
+    /// directly with an explicit asset_id.
+    fn select_notes(&self, amount: u64) -> Result<Vec<usize>, String> {
+        self.select_notes_of_asset(&ASSET_TEZ, amount)
     }
 }
 
@@ -3565,6 +3595,13 @@ enum UserCmd {
         fee: Option<u64>,
         #[arg(long)]
         memo: Option<String>,
+        /// Asset the recipient receives. Defaults to tez. Pass a hex
+        /// asset_id (or "tez"/"0") to send a non-tez asset. The
+        /// wallet picks notes of this asset for the recipient amount;
+        /// tez notes are still used to cover fee + producer fee
+        /// (which must stay tez).
+        #[arg(long)]
+        asset: Option<String>,
     },
     /// Unshield private notes directly to an L1 tz/KT1 recipient.
     Unshield {
@@ -3575,6 +3612,13 @@ enum UserCmd {
         /// Override the default L1 recipient. Defaults to the source alias address.
         #[arg(long)]
         recipient: Option<String>,
+        /// Asset to exit. Defaults to tez. Pass a hex asset_id (or
+        /// "tez"/"0") to exit a non-tez asset; the wallet picks FA2
+        /// notes covering `amount` plus tez notes covering fee +
+        /// producer fee. The L1 outbox dispatches the burn to the
+        /// asset's registered ticketer.
+        #[arg(long)]
+        asset: Option<String>,
     },
     /// Query a submission previously accepted by the configured operator.
     Status {
@@ -3884,22 +3928,33 @@ fn run_user(cli: UserCli) -> Result<(), String> {
             amount,
             fee,
             memo,
+            asset,
         } => {
             let profile = load_required_network_profile(&cli.wallet)?;
-            cmd_transfer_rollup(&cli.wallet, &profile, &to, amount, fee, memo, &pc)
+            let asset_id = match asset {
+                None => ASSET_TEZ,
+                Some(ref hex) => parse_asset_id_hex(hex)?,
+            };
+            cmd_transfer_rollup(&cli.wallet, &profile, &to, amount, fee, memo, asset_id, &pc)
         }
         UserCmd::Unshield {
             amount,
             fee,
             recipient,
+            asset,
         } => {
             let profile = load_required_network_profile(&cli.wallet)?;
+            let asset_id = match asset {
+                None => ASSET_TEZ,
+                Some(ref hex) => parse_asset_id_hex(hex)?,
+            };
             cmd_unshield_rollup(
                 &cli.wallet,
                 &profile,
                 amount,
                 fee,
                 recipient.as_deref(),
+                asset_id,
                 &pc,
             )
         }
@@ -6619,7 +6674,10 @@ mod tests {
         ];
 
         let err = w.select_notes(40).expect_err("overspend should fail");
-        assert!(err.contains("insufficient funds"));
+        // Phase E.7 generalised select_notes_of_asset → error string
+        // now includes the asset label ("tez") between "insufficient"
+        // and "funds".
+        assert!(err.contains("insufficient") && err.contains("funds"));
     }
 
     #[test]
@@ -6677,7 +6735,7 @@ mod tests {
         let err = w
             .select_notes(30)
             .expect_err("pending note must not count toward spendable balance");
-        assert!(err.contains("insufficient funds"));
+        assert!(err.contains("insufficient") && err.contains("funds"));
         assert_eq!(w.available_balance(), 25);
         assert_eq!(w.pending_outgoing_balance(), 40);
     }
@@ -9050,6 +9108,7 @@ fn cmd_transfer_rollup(
     amount: u64,
     fee: Option<u64>,
     memo: Option<String>,
+    recipient_asset_id: F,
     pc: &ProveConfig,
 ) -> Result<(), String> {
     // Upstream patch ④: phase event — entered the transfer path.
@@ -9069,22 +9128,64 @@ fn cmd_transfer_rollup(
     let outgoing_seed = w.account().outgoing_seed;
     let recipient = load_address(to_path)?;
     let producer_address = &profile.dal_fee_address;
-    let total_spend = amount
-        .checked_add(fee)
-        .and_then(|value| value.checked_add(profile.dal_fee))
+
+    // Multi-asset note selection.
+    //   - When sending tez, we pick tez notes covering amount + fee
+    //     + producer_fee (single asset class). change_1 takes the
+    //     leftover tez, change_2 is a zero-value tez placeholder.
+    //   - When sending an FA2 asset, we pick FA2 notes covering the
+    //     recipient amount AND tez notes covering fee + producer_fee.
+    //     change_1 carries the FA2 refund, change_2 carries the tez
+    //     refund (producer-fee tez stays pinned via the circuit).
+    //     The combined input count must still be <= MAX_INPUTS (7).
+    let is_tez = recipient_asset_id == ASSET_TEZ;
+    let mut selected: Vec<usize>;
+    let change_primary: u64; // FA2 (or tez) refund routed to change_1
+    let change_tez: u64;     // tez refund routed to change_2
+    let tez_fees = fee
+        .checked_add(profile.dal_fee)
         .ok_or_else(|| "transfer total spend overflow".to_string())?;
-    let selected = w.select_notes(total_spend)?;
-    let sum_in: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
-    let change = (sum_in - amount as u128 - fee as u128 - profile.dal_fee as u128) as u64;
+    if is_tez {
+        let total = amount
+            .checked_add(tez_fees)
+            .ok_or_else(|| "transfer total spend overflow".to_string())?;
+        selected = w.select_notes_of_asset(&ASSET_TEZ, total)?;
+        let sum_in: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
+        change_primary = (sum_in - amount as u128 - tez_fees as u128) as u64;
+        change_tez = 0;
+    } else {
+        // FA2 notes for the recipient amount.
+        let fa2_idx = w.select_notes_of_asset(&recipient_asset_id, amount)?;
+        let fa2_sum: u128 = fa2_idx.iter().map(|&i| w.notes[i].v as u128).sum();
+        // Tez notes for the fees.
+        let tez_idx = w.select_notes_of_asset(&ASSET_TEZ, tez_fees)?;
+        let tez_sum: u128 = tez_idx.iter().map(|&i| w.notes[i].v as u128).sum();
+        if fa2_idx.len() + tez_idx.len() > 7 {
+            return Err(format!(
+                "multi-asset transfer needs {} inputs ({} fa2 + {} tez) but the circuit caps inputs at 7 — consolidate notes first",
+                fa2_idx.len() + tez_idx.len(),
+                fa2_idx.len(),
+                tez_idx.len(),
+            ));
+        }
+        selected = Vec::with_capacity(fa2_idx.len() + tez_idx.len());
+        selected.extend(fa2_idx);
+        selected.extend(tez_idx);
+        change_primary = (fa2_sum - amount as u128) as u64;
+        change_tez = (tez_sum - tez_fees as u128) as u64;
+    }
+    let _sum_in_for_diag: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
 
     let nullifiers: Vec<F> = selected
         .iter()
         .map(|&i| note_nullifier(&w.notes[i]))
         .collect();
 
-    let note_1 = build_output_note_with_outgoing(
+    // Recipient gets `amount` of `recipient_asset_id`.
+    let note_1 = build_output_note_with_outgoing_asset(
         &recipient,
         amount,
+        &recipient_asset_id,
         memo.as_deref().map(str::as_bytes),
         &outgoing_seed,
         OutgoingNoteRole::TransferRecipient,
@@ -9093,17 +9194,23 @@ fn cmd_transfer_rollup(
     let (change_state, _change_addr) = w.next_address()?;
     let (ek_v_c, _, ek_d_c, _) = w.kem_keys(change_state.index);
     let change_address = change_state.payment_address(&ek_v_c, &ek_d_c);
-    let note_2 = build_output_note_with_outgoing(
+    // change_1 carries the primary refund — same asset as the
+    // recipient (FA2 refund for FA2 transfers, tez refund for tez
+    // transfers).
+    let note_2 = build_output_note_with_outgoing_asset(
         &change_address,
-        change,
+        change_primary,
+        &recipient_asset_id,
         None,
         &outgoing_seed,
         OutgoingNoteRole::TransferChange,
     )?;
-    // Phase C: cm_3 = zero-value tez change_2 placeholder.
+    // change_2 carries the tez refund (only non-zero for FA2 transfers
+    // that also spent tez to pay fees; tez transfers leave this as
+    // a zero-value placeholder).
     let note_3 = build_output_note_with_outgoing(
         &change_address,
-        0,
+        change_tez,
         None,
         &outgoing_seed,
         OutgoingNoteRole::TransferChange,
@@ -9214,12 +9321,12 @@ fn cmd_transfer_rollup(
             }
         }
 
-        // Phase B: per-input asset tags.
-        for _ in 0..n {
-            args.push(felt_to_hex(&ASSET_TEZ));
+        // Multiasset: per-input asset tag from each selected note.
+        for &si in &selected {
+            args.push(felt_to_hex(&w.notes[si].asset_id));
         }
 
-        // Output 1: recipient
+        // Output 1: recipient — asset = recipient_asset_id
         args.push(felt_to_hex(&note_1.cm));
         args.push(felt_to_hex(&recipient.d_j));
         args.push(felt_u64_to_hex(amount));
@@ -9228,23 +9335,24 @@ fn cmd_transfer_rollup(
         args.push(felt_to_hex(&recipient.auth_pub_seed));
         args.push(felt_to_hex(&recipient.nk_tag));
         args.push(felt_to_hex(&note_1.mh));
-        args.push(felt_to_hex(&ASSET_TEZ));
+        args.push(felt_to_hex(&recipient_asset_id));
 
-        // Output 2: change_1
+        // Output 2: change_1 — same asset as recipient (primary refund)
         args.push(felt_to_hex(&note_2.cm));
         args.push(felt_to_hex(&change_state.d_j));
-        args.push(felt_u64_to_hex(change));
+        args.push(felt_u64_to_hex(change_primary));
         args.push(felt_to_hex(&note_2.rseed));
         args.push(felt_to_hex(&change_state.auth_root));
         args.push(felt_to_hex(&change_state.auth_pub_seed));
         args.push(felt_to_hex(&change_state.nk_tag));
         args.push(felt_to_hex(&note_2.mh));
-        args.push(felt_to_hex(&ASSET_TEZ));
+        args.push(felt_to_hex(&recipient_asset_id));
 
-        // Output 3: change_2 (zero-value placeholder)
+        // Output 3: change_2 — always tez (carries the tez refund for
+        // FA2 transfers, or zero-value placeholder for tez transfers)
         args.push(felt_to_hex(&note_3.cm));
         args.push(felt_to_hex(&change_state.d_j));
-        args.push(felt_u64_to_hex(0));
+        args.push(felt_u64_to_hex(change_tez));
         args.push(felt_to_hex(&note_3.rseed));
         args.push(felt_to_hex(&change_state.auth_root));
         args.push(felt_to_hex(&change_state.auth_pub_seed));
@@ -9252,7 +9360,7 @@ fn cmd_transfer_rollup(
         args.push(felt_to_hex(&note_3.mh));
         args.push(felt_to_hex(&ASSET_TEZ));
 
-        // Output 4: producer fee
+        // Output 4: producer fee — permanently tez
         args.push(felt_to_hex(&note_4.cm));
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(profile.dal_fee));
@@ -9263,8 +9371,12 @@ fn cmd_transfer_rollup(
         args.push(felt_to_hex(&note_4.mh));
         args.push(felt_to_hex(&ASSET_TEZ));
 
-        // primary_non_tez_asset (unused in pure-tez transfers)
-        args.push(felt_to_hex(&ASSET_TEZ));
+        // primary_non_tez_asset — the asset_id the 2-accumulator
+        // constraint accepts alongside tez. For tez-only transfers
+        // this can be anything (constraint trivially satisfied), so
+        // we pass ASSET_TEZ for determinism. For FA2 transfers this
+        // is the recipient's asset.
+        args.push(felt_to_hex(&recipient_asset_id));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
         phase_event!("witness_built", { "args_count": args.len() as u64, "args_bytes": args_bytes });
@@ -9312,19 +9424,25 @@ fn cmd_transfer_rollup(
     let cm_1_hex = hex::encode(&note_1.cm);
     let cm_2_hex = hex::encode(&note_2.cm);
     let cm_3_hex = hex::encode(&note_3.cm);
+    // `change` historically reported the tez refund. With multi-
+    // asset transfers we have two refunds (primary and tez); preserve
+    // the existing JSON key by reporting the primary-asset refund
+    // there (matches the tez case exactly when sending tez) and add
+    // a parallel tez-refund field for FA2 transfers.
     user_out!(
         json: {
             "amount" => amount,
             "fee" => fee,
             "dal_fee" => profile.dal_fee,
-            "change" => change,
+            "change" => change_primary,
+            "change_tez" => change_tez,
             "nullifiers" => nullifiers_hex,
             "recipient_cm" => &cm_1_hex,
             "change_cm" => &cm_2_hex,
             "producer_cm" => &cm_3_hex,
         },
         human: "Submitted transfer of {} with fee {} + dal fee {} and change {}",
-        amount, fee, profile.dal_fee, change
+        amount, fee, profile.dal_fee, change_primary
     );
     print_rollup_submission(&submission);
     print_rollup_sync_hint(&submission);
@@ -9337,6 +9455,7 @@ fn cmd_unshield_rollup(
     amount: u64,
     fee: Option<u64>,
     recipient: Option<&str>,
+    exit_asset_id: F,
     pc: &ProveConfig,
 ) -> Result<(), String> {
     // Upstream patch ④: phase event — entered the unshield path.
@@ -9358,26 +9477,86 @@ fn cmd_unshield_rollup(
     let mut w = load_wallet(path)?;
     let outgoing_seed = w.account().outgoing_seed;
     let producer_address = &profile.dal_fee_address;
-    let total_spend = amount
-        .checked_add(fee)
-        .and_then(|value| value.checked_add(profile.dal_fee))
+    let is_tez_exit = exit_asset_id == ASSET_TEZ;
+    let tez_fees = fee
+        .checked_add(profile.dal_fee)
         .ok_or_else(|| "unshield total spend overflow".to_string())?;
-    let selected = w.select_notes(total_spend)?;
-    let sum_in: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
-    let change = (sum_in - amount as u128 - fee as u128 - profile.dal_fee as u128) as u64;
+    // Multi-asset note selection. Tez exits draw from a single pool
+    // (amount + fee + producer_fee from tez). FA2 exits draw from
+    // two pools: FA2 notes for the exit amount and tez notes for
+    // fees (the producer fee stays pinned to tez).
+    let mut selected: Vec<usize>;
+    let change_primary: u64; // exit-asset refund routed to change_1
+    let change_tez: u64;     // tez refund routed to change_2 (FA2 exits)
+    if is_tez_exit {
+        let total = amount
+            .checked_add(tez_fees)
+            .ok_or_else(|| "unshield total spend overflow".to_string())?;
+        selected = w.select_notes_of_asset(&ASSET_TEZ, total)?;
+        let sum_in: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
+        change_primary = (sum_in - amount as u128 - tez_fees as u128) as u64;
+        change_tez = 0;
+    } else {
+        let fa2_idx = w.select_notes_of_asset(&exit_asset_id, amount)?;
+        let fa2_sum: u128 = fa2_idx.iter().map(|&i| w.notes[i].v as u128).sum();
+        let tez_idx = w.select_notes_of_asset(&ASSET_TEZ, tez_fees)?;
+        let tez_sum: u128 = tez_idx.iter().map(|&i| w.notes[i].v as u128).sum();
+        if fa2_idx.len() + tez_idx.len() > 7 {
+            return Err(format!(
+                "multi-asset unshield needs {} inputs ({} fa2 + {} tez) but the circuit caps inputs at 7 — consolidate notes first",
+                fa2_idx.len() + tez_idx.len(),
+                fa2_idx.len(),
+                tez_idx.len(),
+            ));
+        }
+        selected = Vec::with_capacity(fa2_idx.len() + tez_idx.len());
+        selected.extend(fa2_idx);
+        selected.extend(tez_idx);
+        change_primary = (fa2_sum - amount as u128) as u64;
+        change_tez = (tez_sum - tez_fees as u128) as u64;
+    }
 
     let nullifiers: Vec<F> = selected
         .iter()
         .map(|&i| note_nullifier(&w.notes[i]))
         .collect();
 
-    let (cm_change, enc_change, change_data) = if change > 0 {
+    // change_1 carries the exit-asset refund (FA2 refund for FA2
+    // exits, or the leftover tez for tez exits).
+    let (cm_change, enc_change, change_data) = if change_primary > 0 {
+        let (change_state, _change_addr) = w.next_address()?;
+        let (ek_v_c, _, ek_d_c, _) = w.kem_keys(change_state.index);
+        let change_address = change_state.payment_address(&ek_v_c, &ek_d_c);
+        let note = build_output_note_with_outgoing_asset(
+            &change_address,
+            change_primary,
+            &exit_asset_id,
+            None,
+            &outgoing_seed,
+            OutgoingNoteRole::UnshieldChange,
+        )?;
+        let cd = ChangeData {
+            d_j: change_state.d_j,
+            rseed: note.rseed,
+            auth_root: change_state.auth_root,
+            auth_pub_seed: change_state.auth_pub_seed,
+            nk_tag: change_state.nk_tag,
+            mh: note.mh,
+        };
+        (note.cm, Some(note.enc), Some(cd))
+    } else {
+        (ZERO, None, None)
+    };
+
+    // change_2 carries the tez refund for FA2 exits (always tez).
+    // For tez exits the slot is a zero-value placeholder.
+    let (cm_change_2, enc_change_2, change_data_2) = if change_tez > 0 {
         let (change_state, _change_addr) = w.next_address()?;
         let (ek_v_c, _, ek_d_c, _) = w.kem_keys(change_state.index);
         let change_address = change_state.payment_address(&ek_v_c, &ek_d_c);
         let note = build_output_note_with_outgoing(
             &change_address,
-            change,
+            change_tez,
             None,
             &outgoing_seed,
             OutgoingNoteRole::UnshieldChange,
@@ -9411,24 +9590,25 @@ fn cmd_unshield_rollup(
         let mut wots_sigs: Vec<Vec<F>> = vec![];
         let mut auth_pub_seeds: Vec<F> = vec![];
 
-        let has_change_val: u64 = if change > 0 { 1 } else { 0 };
+        let has_change_val: u64 = if change_primary > 0 { 1 } else { 0 };
+        let has_change_2_val: u64 = if change_tez > 0 { 1 } else { 0 };
         let recipient_f = hash(recipient.as_bytes());
         let mh_change_f = change_data.as_ref().map(|cd| cd.mh).unwrap_or(ZERO);
+        let mh_change_2_f = change_data_2.as_ref().map(|cd| cd.mh).unwrap_or(ZERO);
         let sighash = unshield_sighash(
             &auth_domain,
             &root,
             &nullifiers,
             amount,
-            &ASSET_TEZ,
+            &exit_asset_id,
             fee,
             &recipient_f,
             &cm_change,
             &mh_change_f,
-            &ZERO,
-            &ZERO,
+            &cm_change_2,
+            &mh_change_2_f,
             &producer_note.cm,
-            &producer_note.mh
-        
+            &producer_note.mh,
         );
 
         let mut wots_key_indices: Vec<u32> = vec![];
@@ -9502,15 +9682,33 @@ fn cmd_unshield_rollup(
             }
         }
 
-        // Phase B: per-input asset tags.
-        for _ in 0..n {
-            args.push(felt_to_hex(&ASSET_TEZ));
+        // Multiasset: per-input asset tag from each selected note.
+        for &si in &selected {
+            args.push(felt_to_hex(&w.notes[si].asset_id));
         }
 
+        // change_1: primary refund (same asset as exit_asset_id).
         args.push(felt_u64_to_hex(has_change_val));
         if let Some(cd) = &change_data {
             args.push(felt_to_hex(&cd.d_j));
-            args.push(felt_u64_to_hex(change));
+            args.push(felt_u64_to_hex(change_primary));
+            args.push(felt_to_hex(&cd.rseed));
+            args.push(felt_to_hex(&cd.auth_root));
+            args.push(felt_to_hex(&cd.auth_pub_seed));
+            args.push(felt_to_hex(&cd.nk_tag));
+            args.push(felt_to_hex(&cd.mh));
+        } else {
+            for _ in 0..7 {
+                args.push("0x0".to_string());
+            }
+        }
+        args.push(felt_to_hex(&exit_asset_id));
+
+        // change_2: tez refund (only non-zero for FA2 exits).
+        args.push(felt_u64_to_hex(has_change_2_val));
+        if let Some(cd) = &change_data_2 {
+            args.push(felt_to_hex(&cd.d_j));
+            args.push(felt_u64_to_hex(change_tez));
             args.push(felt_to_hex(&cd.rseed));
             args.push(felt_to_hex(&cd.auth_root));
             args.push(felt_to_hex(&cd.auth_pub_seed));
@@ -9523,11 +9721,6 @@ fn cmd_unshield_rollup(
         }
         args.push(felt_to_hex(&ASSET_TEZ));
 
-        // Phase C: change_2 block (always zero in v1) + asset_change_2.
-        for _ in 0..9 {
-            args.push("0x0".to_string());
-        }
-
         args.push(felt_to_hex(&producer_address.d_j));
         args.push(felt_u64_to_hex(profile.dal_fee));
         args.push(felt_to_hex(&producer_note.rseed));
@@ -9537,8 +9730,12 @@ fn cmd_unshield_rollup(
         args.push(felt_to_hex(&producer_note.mh));
         args.push(felt_to_hex(&ASSET_TEZ));
 
-        args.push(felt_to_hex(&ASSET_TEZ));
-        args.push(felt_to_hex(&ASSET_TEZ));
+        // asset_pub (L1 exit asset) + primary_non_tez_asset (the
+        // 2-accumulator witness). Both are the user's chosen exit
+        // asset; for tez exits this collapses both accumulators
+        // into the tez lane.
+        args.push(felt_to_hex(&exit_asset_id));
+        args.push(felt_to_hex(&exit_asset_id));
 
         let args_bytes = serde_json::to_string(&args).map(|s| s.len() as u64).unwrap_or(0);
         phase_event!("witness_built", { "args_count": args.len() as u64, "args_bytes": args_bytes });
@@ -9554,8 +9751,8 @@ fn cmd_unshield_rollup(
         recipient: recipient.clone(),
         cm_change,
         enc_change,
-        cm_change_2: ZERO,
-        enc_change_2: None,
+        cm_change_2,
+        enc_change_2,
         cm_fee: producer_note.cm,
         enc_fee: producer_note.enc,
         proof,
@@ -9585,8 +9782,13 @@ fn cmd_unshield_rollup(
     // Upstream patch ①: emit a structured envelope while preserving the new
     // L1-recipient outbox/cementation wording introduced by the streamline-
     // unshield-withdrawals rewrite.
-    let change_cm_hex = if change > 0 {
+    let change_cm_hex = if change_primary > 0 {
         Some(hex::encode(&cm_change))
+    } else {
+        None
+    };
+    let change_2_cm_hex = if change_tez > 0 {
+        Some(hex::encode(&cm_change_2))
     } else {
         None
     };
@@ -9596,10 +9798,15 @@ fn cmd_unshield_rollup(
             "amount" => amount,
             "fee" => fee,
             "dal_fee" => profile.dal_fee,
-            "change" => change,
+            // "change" historically meant the single refund (tez).
+            // Keep that key as the primary-asset refund (exit-asset);
+            // expose the tez refund separately for FA2 exits.
+            "change" => change_primary,
+            "change_tez" => change_tez,
             "recipient" => recipient,
             "nullifiers" => nullifiers_hex,
             "change_cm" => change_cm_hex,
+            "change_2_cm" => change_2_cm_hex,
             "producer_cm" => hex::encode(&producer_note.cm),
             "outbox_note" => outbox_note,
         },
@@ -10140,6 +10347,7 @@ mod network_profile_tests {
             amount,
             None,
             Some(recipient),
+            ASSET_TEZ,
             &pc,
         )
         .expect("explicit L1 unshield recipient should not require octez source lookup");
