@@ -26,6 +26,7 @@ getrandom = { version = "0.2.17", features = ["custom"] }
 
 [dev-dependencies]
 ml-kem = "=0.3.0-rc.2"
+proptest = "1"
 # Integration tests exercise the FA2 registry override path to test
 # per-asset deposit / shield / unshield routing against synthetic
 # ticketers without polluting the production registry. Importantly

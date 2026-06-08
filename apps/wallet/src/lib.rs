@@ -5467,6 +5467,214 @@ mod tests {
 
             prop_assert!(selected_sum >= amount as u128);
         }
+
+        /// select_notes_of_asset returns ONLY notes of the
+        /// requested asset. Even with a mixed-asset note bag, the
+        /// picker must never include a wrong-asset note in the
+        /// selection — that would break the per-asset balance the
+        /// circuit enforces.
+        #[test]
+        fn prop_select_notes_of_asset_filters_by_asset(
+            tez_values in prop::collection::vec(1u64..10_000, 0..6),
+            fa2_values in prop::collection::vec(1u64..10_000, 1..6),
+        ) {
+            // Build a mixed note bag. fa2_values is non-empty so
+            // we always have a primary-asset selection to make.
+            let mut w = test_wallet(0);
+            let primary_asset = hash(b"prop-fa2-asset");
+            let mut idx = 0usize;
+            for v in &tez_values {
+                w.notes.push(Note {
+                    nk_spend: ZERO,
+                    nk_tag: ZERO,
+                    auth_root: ZERO,
+                    d_j: ZERO,
+                    v: *v,
+                    rseed: u64_to_felt(idx as u64),
+                    cm: u64_to_felt(0xCC00 + idx as u64),
+                    index: idx,
+                    addr_index: 0,
+                    asset_id: ASSET_TEZ,
+                });
+                idx += 1;
+            }
+            for v in &fa2_values {
+                w.notes.push(Note {
+                    nk_spend: ZERO,
+                    nk_tag: ZERO,
+                    auth_root: ZERO,
+                    d_j: ZERO,
+                    v: *v,
+                    rseed: u64_to_felt(idx as u64),
+                    cm: u64_to_felt(0xCC00 + idx as u64),
+                    index: idx,
+                    addr_index: 0,
+                    asset_id: primary_asset,
+                });
+                idx += 1;
+            }
+
+            let fa2_total: u64 = fa2_values.iter().sum();
+            let amount = fa2_total.min(1 + fa2_total / 2);
+            let selected = w
+                .select_notes_of_asset(&primary_asset, amount)
+                .expect("selection should succeed");
+
+            // Every selected note must carry the primary asset.
+            for i in &selected {
+                prop_assert_eq!(
+                    w.notes[*i].asset_id,
+                    primary_asset,
+                    "selection MUST be filtered to the requested asset",
+                );
+            }
+            // Selected sum must cover the amount.
+            let sum: u128 = selected.iter().map(|&i| w.notes[i].v as u128).sum();
+            prop_assert!(sum >= amount as u128);
+        }
+
+        /// balance_by_asset partitions the wallet's notes exactly:
+        /// the sum of per-asset totals equals the unpartitioned
+        /// balance. This is the "no notes silently disappear into
+        /// the wrong asset" invariant.
+        #[test]
+        fn prop_balance_by_asset_sums_to_total(
+            notes in prop::collection::vec(
+                (any::<u64>(), prop::array::uniform32(any::<u8>())),
+                0..20,
+            ),
+        ) {
+            let mut w = test_wallet(0);
+            for (i, (v, asset_bytes)) in notes.iter().enumerate() {
+                w.notes.push(Note {
+                    nk_spend: ZERO,
+                    nk_tag: ZERO,
+                    auth_root: ZERO,
+                    d_j: ZERO,
+                    v: *v,
+                    rseed: u64_to_felt(i as u64),
+                    cm: u64_to_felt(0xDD00 + i as u64),
+                    index: i,
+                    addr_index: 0,
+                    asset_id: *asset_bytes,
+                });
+            }
+
+            let by_asset_sum: u128 = w.balance_by_asset().iter().map(|(_, b)| *b).sum();
+            prop_assert_eq!(by_asset_sum, w.balance());
+        }
+
+        /// balance_by_asset always reports tez (ASSET_TEZ) first
+        /// when present. The wallet's display code relies on this
+        /// ordering for the human-readable "Private balance: <n>"
+        /// summary line.
+        #[test]
+        fn prop_balance_by_asset_orders_tez_first(
+            asset_seed in any::<u32>(),
+            n_tez in 0u32..5,
+            n_fa2 in 0u32..5,
+        ) {
+            prop_assume!(n_tez > 0 || n_fa2 > 0);
+            let mut w = test_wallet(0);
+            let primary = hash(format!("asset-{}", asset_seed).as_bytes());
+            prop_assume!(primary != ASSET_TEZ);
+            let mut idx = 0usize;
+            for _ in 0..n_tez {
+                w.notes.push(Note {
+                    nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+                    v: 100, rseed: u64_to_felt(idx as u64), cm: u64_to_felt(0xEE00 + idx as u64),
+                    index: idx, addr_index: 0, asset_id: ASSET_TEZ,
+                });
+                idx += 1;
+            }
+            for _ in 0..n_fa2 {
+                w.notes.push(Note {
+                    nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+                    v: 200, rseed: u64_to_felt(idx as u64), cm: u64_to_felt(0xEE00 + idx as u64),
+                    index: idx, addr_index: 0, asset_id: primary,
+                });
+                idx += 1;
+            }
+
+            let by_asset = w.balance_by_asset();
+            if n_tez > 0 {
+                prop_assert_eq!(by_asset[0].0, ASSET_TEZ);
+            } else if n_fa2 > 0 {
+                // No tez notes → tez doesn't appear at all.
+                prop_assert!(by_asset.iter().all(|(a, _)| *a != ASSET_TEZ));
+            }
+        }
+    }
+
+    /// select_notes_of_asset must error cleanly when the wallet
+    /// has no notes of the requested asset, regardless of how
+    /// much tez it holds. This is the cross-asset-isolation
+    /// invariant under failure.
+    #[test]
+    fn test_select_notes_of_asset_returns_error_for_unknown_asset() {
+        let mut w = test_wallet(0);
+        w.notes.push(Note {
+            nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+            v: 1_000_000, rseed: ZERO, cm: u64_to_felt(0xFFFF),
+            index: 0, addr_index: 0, asset_id: ASSET_TEZ,
+        });
+        let unknown_asset = hash(b"never-deposited");
+        let err = w
+            .select_notes_of_asset(&unknown_asset, 100)
+            .expect_err("must fail when no notes of asset exist");
+        assert!(err.contains("insufficient"));
+        // Tez balance is untouched.
+        assert_eq!(w.balance(), 1_000_000);
+        assert_eq!(w.available_balance(), 1_000_000);
+    }
+
+    /// A wallet with one note of an FA2 asset and zero tez can
+    /// answer balance queries correctly for both assets — the
+    /// nested-map structure of deposit_balances must report 0 for
+    /// the missing inner key, not panic.
+    #[test]
+    fn test_balance_queries_handle_missing_inner_asset_correctly() {
+        let mut w = test_wallet(0);
+        let primary = hash(b"single-fa2");
+        w.notes.push(Note {
+            nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+            v: 42, rseed: ZERO, cm: u64_to_felt(0xAAAA),
+            index: 0, addr_index: 0, asset_id: primary,
+        });
+        assert_eq!(w.balance(), 42);
+        let breakdown = w.balance_by_asset();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0].0, primary);
+        assert_eq!(breakdown[0].1, 42);
+    }
+
+    /// Mixed tez + FA2 wallet: balance_by_asset preserves both
+    /// totals exactly, with tez first.
+    #[test]
+    fn test_mixed_wallet_balance_breakdown() {
+        let mut w = test_wallet(0);
+        let primary = hash(b"fa2-asset");
+        w.notes.push(Note {
+            nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+            v: 100, rseed: ZERO, cm: u64_to_felt(1),
+            index: 0, addr_index: 0, asset_id: ASSET_TEZ,
+        });
+        w.notes.push(Note {
+            nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+            v: 200, rseed: ZERO, cm: u64_to_felt(2),
+            index: 1, addr_index: 0, asset_id: ASSET_TEZ,
+        });
+        w.notes.push(Note {
+            nk_spend: ZERO, nk_tag: ZERO, auth_root: ZERO, d_j: ZERO,
+            v: 500, rseed: ZERO, cm: u64_to_felt(3),
+            index: 2, addr_index: 0, asset_id: primary,
+        });
+        let breakdown = w.balance_by_asset();
+        assert_eq!(breakdown.len(), 2);
+        assert_eq!(breakdown[0].0, ASSET_TEZ);
+        assert_eq!(breakdown[0].1, 300);
+        assert_eq!(breakdown[1].0, primary);
+        assert_eq!(breakdown[1].1, 500);
     }
 
     #[test]

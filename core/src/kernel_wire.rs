@@ -1271,6 +1271,7 @@ mod tests {
         let decoded = decode_kernel_inbox_message(&encoded).unwrap();
         match decoded {
             KernelInboxMessage::Shield(req) => {
+                assert_eq!(req.asset_id, ASSET_TEZ);
                 assert_eq!(req.pubkey_hash, pubkey_hash);
                 assert_eq!(req.fee, 3);
                 assert_eq!(req.v, 42);
@@ -1283,6 +1284,40 @@ mod tests {
                 assert_eq!(req.client_enc.ct_d, sample_encrypted_note(0x66).ct_d);
                 assert_eq!(req.producer_cm, [9u8; 32]);
                 assert_eq!(req.producer_enc.ct_d, sample_encrypted_note(0x77).ct_d);
+            }
+            other => panic!("unexpected decoded message: {:?}", other),
+        }
+    }
+
+    /// Same roundtrip but with an arbitrary FA2 asset_id. Ensures
+    /// the kernel-wire encoder writes + reads the asset_id field
+    /// correctly for non-zero values. Critical: a bug that
+    /// silently zeroed asset_id would route every FA2 shield to
+    /// the tez pool.
+    #[test]
+    fn kernel_inbox_roundtrip_preserves_fa2_asset_id_on_shield_request() {
+        let fa2_asset = [0xAB; 32];
+        let pubkey_hash = [0x42; 32];
+        let message = KernelInboxMessage::Shield(KernelShieldReq {
+            asset_id: fa2_asset,
+            pubkey_hash,
+            fee: 3,
+            v: 42,
+            producer_fee: 5,
+            proof: sample_kernel_stark_proof(),
+            client_cm: [0x55; 32],
+            client_enc: sample_encrypted_note(0x66),
+            producer_cm: [9u8; 32],
+            producer_enc: sample_encrypted_note(0x77),
+        });
+        let encoded = encode_kernel_inbox_message(&message).unwrap();
+        let decoded = decode_kernel_inbox_message(&encoded).unwrap();
+        match decoded {
+            KernelInboxMessage::Shield(req) => {
+                assert_eq!(
+                    req.asset_id, fa2_asset,
+                    "asset_id MUST survive kernel-wire roundtrip — a silent zeroing would route FA2 shields to the tez pool",
+                );
             }
             other => panic!("unexpected decoded message: {:?}", other),
         }
@@ -1924,6 +1959,7 @@ mod tests {
         #[test]
         fn prop_kernel_requests_to_host_preserve_fields(
             pubkey_hash in arb_felt(),
+            asset_id in arb_felt(),
             recipient in small_string(32),
             root in arb_felt(),
             nullifiers in prop::collection::vec(arb_felt(), 0..8),
@@ -1946,7 +1982,7 @@ mod tests {
             producer_enc in arb_encrypted_note(),
         ) {
             let shield = KernelShieldReq {
-                asset_id: ASSET_TEZ,
+                asset_id,
                 pubkey_hash,
                 fee,
                 v: value,
@@ -1958,6 +1994,9 @@ mod tests {
                 producer_enc: producer_enc.clone(),
             };
             let shield_host = kernel_shield_req_to_host(&shield);
+            // asset_id roundtrips intact for any felt value —
+            // critical for FA2 shields where asset_id != ASSET_TEZ.
+            prop_assert_eq!(shield_host.asset_id, asset_id);
             prop_assert_eq!(shield_host.pubkey_hash, pubkey_hash);
             prop_assert_eq!(shield_host.fee, fee);
             prop_assert_eq!(shield_host.v, value);

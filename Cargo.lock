@@ -5270,6 +5270,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "ml-kem",
+ "proptest",
  "serde",
  "serde_json",
  "tezos-smart-rollup-encoding",
