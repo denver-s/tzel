@@ -1285,10 +1285,29 @@ pub struct OutgoingRecoveryPlaintext {
 }
 
 impl OutgoingRecoveryPlaintext {
-    pub fn commitment(&self) -> F {
+    /// Recompute the commitment for this outgoing-recovery plaintext
+    /// against a candidate `asset_id`. The plaintext does NOT store
+    /// `asset_id` (a wire-format bump would invalidate every
+    /// pre-multiasset OutgoingRecoveryPlaintext on chain), so the
+    /// caller — typically the wallet — passes each registered asset
+    /// in turn and keeps the one that matches the on-chain `cm`. See
+    /// `commitment_against_tez` for the pre-multiasset shorthand that
+    /// most call sites in the tez-only era used.
+    pub fn commitment_for_asset(&self, asset_id: &F) -> F {
         let rcm = derive_rcm(&self.rseed);
         let owner = owner_tag(&self.auth_root, &self.auth_pub_seed, &self.nk_tag);
-        commit(&self.d_j, self.value, &ASSET_TEZ, &rcm, &owner)
+        commit(&self.d_j, self.value, asset_id, &rcm, &owner)
+    }
+
+    /// Convenience: re-derive the commitment under the tez asset.
+    /// Use this only when the caller is sure the recovered note is
+    /// tez (e.g. tez-only deployments, tests). The multiasset
+    /// watcher path should iterate `commitment_for_asset` over the
+    /// candidate registry instead — without that, watch-only
+    /// wallets would silently lose visibility of every FA2 receipt
+    /// (the on-chain `cm` commits to the FA2 asset_id, not tez).
+    pub fn commitment(&self) -> F {
+        self.commitment_for_asset(&ASSET_TEZ)
     }
 
     pub fn encode(&self) -> [u8; OUTGOING_RECOVERY_PLAINTEXT_BYTES] {
@@ -3270,6 +3289,42 @@ mod tests {
             None,
             "outgoing recovery is bound to the note commitment"
         );
+    }
+
+    /// Phase E.5 regression: `OutgoingRecoveryPlaintext::commitment_for_asset`
+    /// must recompute the commitment under the supplied asset_id so
+    /// the wallet's outgoing-watcher recovery path can iterate the
+    /// candidate registry and label each recovered note with the
+    /// correct asset. Before this fix the function hardcoded
+    /// ASSET_TEZ, making outgoing watchers blind to every FA2 send.
+    #[test]
+    fn test_outgoing_recovery_commitment_for_asset_distinguishes_tez_and_fa2() {
+        let (_account, addr, _, _, _) = sample_address_bundle(0x02, 0);
+        let rseed = u(778);
+        let plaintext = OutgoingRecoveryPlaintext {
+            role: OutgoingNoteRole::TransferRecipient,
+            value: 123,
+            rseed,
+            d_j: addr.d_j,
+            auth_root: addr.auth_root,
+            auth_pub_seed: addr.auth_pub_seed,
+            nk_tag: addr.nk_tag,
+        };
+
+        let fa2_asset = derive_asset_id("KT1FA2_recovery_test");
+        assert_ne!(fa2_asset, ASSET_TEZ);
+
+        let cm_tez = plaintext.commitment_for_asset(&ASSET_TEZ);
+        let cm_fa2 = plaintext.commitment_for_asset(&fa2_asset);
+
+        assert_ne!(
+            cm_tez, cm_fa2,
+            "commitment must depend on asset_id; tez and FA2 commitments cannot collide",
+        );
+        // The convenience `commitment()` shorthand returns the
+        // tez-side commitment (kept for backward compatibility with
+        // pre-multiasset call sites).
+        assert_eq!(plaintext.commitment(), cm_tez);
     }
 
     struct LimitedAppendLedgerState {

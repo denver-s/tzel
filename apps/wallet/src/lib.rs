@@ -614,6 +614,14 @@ struct ViewedNoteRecord {
     value: u64,
     #[serde(default, with = "hex_bytes")]
     memo: Vec<u8>,
+    /// Asset class of the recovered note. Defaults to `ASSET_TEZ` so
+    /// records written by the pre-multiasset wallet deserialize
+    /// cleanly. The multiasset recovery path now iterates the
+    /// candidate registry and records whichever asset_id matched the
+    /// on-chain `cm` — without this field a view watcher would have
+    /// no way to label FA2 receipts.
+    #[serde(default = "default_asset_tez", with = "hex_f")]
+    asset_id: F,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -633,6 +641,14 @@ struct OutgoingNoteRecord {
     auth_pub_seed: F,
     #[serde(with = "hex_f")]
     nk_tag: F,
+    /// Asset class of the recovered note. See `ViewedNoteRecord` for
+    /// the rationale.
+    #[serde(default = "default_asset_tez", with = "hex_f")]
+    asset_id: F,
+}
+
+fn default_asset_tez() -> F {
+    ASSET_TEZ
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1145,11 +1161,28 @@ fn detect_record_for_note(
     None
 }
 
+/// Candidate-asset list for watcher-mode commitment matching. Order
+/// is ASSET_TEZ first (the overwhelmingly common case), then each
+/// compile-time FA2 entry. Mirrors `recover_note_for_address` so the
+/// view/outgoing watch paths recover FA2 notes the same way the full
+/// wallet does. Without this, a watch wallet would silently lose
+/// visibility of every FA2 receipt because the on-chain `cm`
+/// commits to the FA2 asset_id, not tez.
+fn watcher_asset_candidates() -> Vec<F> {
+    let mut candidates: Vec<F> = Vec::with_capacity(1 + COMPILE_TIME_FA2_BRIDGES.len());
+    candidates.push(ASSET_TEZ);
+    for ticketer in COMPILE_TIME_FA2_BRIDGES {
+        candidates.push(derive_asset_id(ticketer));
+    }
+    candidates
+}
+
 fn view_record_for_note(
     incoming_seed: &F,
     addresses: &[WatchAddressRecord],
     nm: &NoteMemo,
 ) -> Option<ViewedNoteRecord> {
+    let candidates = watcher_asset_candidates();
     for addr in addresses {
         let (_, dk_v, _, dk_d) = derive_kem_keys(incoming_seed, addr.index);
         if !detect(&nm.enc, &dk_d) {
@@ -1160,15 +1193,22 @@ fn view_record_for_note(
         };
         let rcm = derive_rcm(&rseed);
         let owner = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &addr.nk_tag);
-        if commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &owner) != nm.cm {
+        // Try each candidate asset; the first one whose commitment
+        // matches the on-chain `cm` is the asset this note carries.
+        let Some(asset_id) = candidates
+            .iter()
+            .copied()
+            .find(|asset| commit(&addr.d_j, value, asset, &rcm, &owner) == nm.cm)
+        else {
             continue;
-        }
+        };
         return Some(ViewedNoteRecord {
             index: nm.index,
             addr_index: addr.index,
             cm: nm.cm,
             value,
             memo: trim_decrypted_memo(memo),
+            asset_id,
         });
     }
     None
@@ -1176,9 +1216,13 @@ fn view_record_for_note(
 
 fn outgoing_record_for_note(outgoing_seed: &F, nm: &NoteMemo) -> Option<OutgoingNoteRecord> {
     let recovery = decrypt_outgoing_recovery(outgoing_seed, &nm.cm, &nm.enc.outgoing_ct)?;
-    if recovery.commitment() != nm.cm {
-        return None;
-    }
+    // OutgoingRecoveryPlaintext does NOT carry asset_id (changing its
+    // wire format would break every pre-multiasset outgoing-recovery
+    // ciphertext on chain), so iterate candidates and pick the asset
+    // whose commitment recomputes to the on-chain `cm`.
+    let asset_id = watcher_asset_candidates()
+        .into_iter()
+        .find(|asset| recovery.commitment_for_asset(asset) == nm.cm)?;
     Some(OutgoingNoteRecord {
         index: nm.index,
         role: recovery.role.as_str().into(),
@@ -1189,6 +1233,7 @@ fn outgoing_record_for_note(outgoing_seed: &F, nm: &NoteMemo) -> Option<Outgoing
         auth_root: recovery.auth_root,
         auth_pub_seed: recovery.auth_pub_seed,
         nk_tag: recovery.nk_tag,
+        asset_id,
     })
 }
 
@@ -5396,13 +5441,28 @@ mod tests {
         rseed: F,
         memo: Option<&[u8]>,
     ) -> NoteMemo {
+        note_memo_for_wallet_address_with_asset(w, j, value, rseed, memo, &ASSET_TEZ)
+    }
+
+    /// Construct a NoteMemo whose commitment is computed against an
+    /// arbitrary `asset_id`. Used by the FA2 watcher-recovery
+    /// regression tests to prove that view/outgoing watchers
+    /// correctly handle non-tez notes.
+    pub(super) fn note_memo_for_wallet_address_with_asset(
+        w: &WalletFile,
+        j: u32,
+        value: u64,
+        rseed: F,
+        memo: Option<&[u8]>,
+        asset_id: &F,
+    ) -> NoteMemo {
         let acc = w.account();
         let addr = &w.addresses[j as usize];
         let nk_sp = derive_nk_spend(&acc.nk, &addr.d_j);
         let nk_tg = derive_nk_tag(&nk_sp);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rcm = derive_rcm(&rseed);
-        let cm = commit(&addr.d_j, value, &ASSET_TEZ, &rcm, &otag);
+        let cm = commit(&addr.d_j, value, asset_id, &rcm, &otag);
         let (ek_v, _, ek_d, _) = w.kem_keys(j);
         let enc = encrypt_note(value, &rseed, memo, &ek_v, &ek_d);
         NoteMemo { index: 0, cm, enc }
@@ -5825,6 +5885,59 @@ mod tests {
         assert!(view_record_for_note(&incoming_seed, &addresses, &nm).is_none());
     }
 
+    /// Phase E.5 regression for the view-watcher FA2-blindness bug.
+    /// Before the fix, `view_record_for_note` hardcoded ASSET_TEZ
+    /// when recomputing the commitment, so a view watcher silently
+    /// dropped every FA2 receipt — the on-chain `cm` commits to the
+    /// FA2 asset_id, not tez, so the comparison always failed. The
+    /// fix iterates the candidate registry (tez + COMPILE_TIME_FA2_BRIDGES)
+    /// and labels the recovered record with whichever asset matched.
+    #[test]
+    fn test_view_material_recovers_fa2_note_under_compile_time_bridge() {
+        let Some(ticketer) = COMPILE_TIME_FA2_BRIDGES.first() else {
+            // No FA2 bridge registered at compile time — the
+            // candidate registry has only tez. This branch documents
+            // that the test asserts a property that only matters when
+            // FA2 bridges exist.
+            return;
+        };
+        let fa2_asset = derive_asset_id(ticketer);
+        assert_ne!(
+            fa2_asset, ASSET_TEZ,
+            "compile-time FA2 ticketer must hash to a non-tez asset_id",
+        );
+
+        let w = test_wallet(1);
+        let material = WatchKeyMaterial::from_view_wallet(&w);
+        let WatchKeyMaterial::View {
+            incoming_seed,
+            addresses,
+            ..
+        } = material
+        else {
+            panic!("expected view material");
+        };
+
+        let nm = note_memo_for_wallet_address_with_asset(
+            &w,
+            0,
+            123,
+            felt_tag(b"watch-view-fa2"),
+            Some(b"fa2-memo"),
+            &fa2_asset,
+        );
+        let recovered = view_record_for_note(&incoming_seed, &addresses, &nm)
+            .expect("view material must recover FA2 wallet notes");
+        assert_eq!(recovered.addr_index, 0);
+        assert_eq!(recovered.cm, nm.cm);
+        assert_eq!(recovered.value, 123);
+        assert_eq!(recovered.memo, b"fa2-memo");
+        assert_eq!(
+            recovered.asset_id, fa2_asset,
+            "recovered record must be labelled with the FA2 asset_id, not tez",
+        );
+    }
+
     #[test]
     fn test_outgoing_export_and_watch_recover_sent_output() {
         let w = test_wallet(1);
@@ -5867,6 +5980,53 @@ mod tests {
         assert!(
             outgoing_record_for_note(&other.account().incoming_seed, &nm).is_none(),
             "wrong key material must not recover outgoing note"
+        );
+    }
+
+    /// Phase E.5 regression for the outgoing-watcher FA2-blindness
+    /// bug. Before the fix, `OutgoingRecoveryPlaintext::commitment`
+    /// hardcoded ASSET_TEZ, so an outgoing watcher (the sender's
+    /// view of their own sent notes) silently dropped every FA2
+    /// note they sent. The fix iterates the candidate registry and
+    /// returns the asset that matches the on-chain `cm`. The
+    /// OutgoingRecoveryPlaintext wire format is unchanged — we
+    /// could not bump it without invalidating every existing
+    /// outgoing-recovery ciphertext on chain.
+    #[test]
+    fn test_outgoing_material_recovers_fa2_note_under_compile_time_bridge() {
+        let Some(ticketer) = COMPILE_TIME_FA2_BRIDGES.first() else {
+            return;
+        };
+        let fa2_asset = derive_asset_id(ticketer);
+        assert_ne!(fa2_asset, ASSET_TEZ);
+
+        let w = test_wallet(1);
+        let outgoing_seed = w.account().outgoing_seed;
+        let (ek_v, _, ek_d, _) = w.kem_keys(0);
+        let address = w.addresses[0].payment_address(&ek_v, &ek_d);
+        let note = build_output_note_with_outgoing_asset(
+            &address,
+            91,
+            &fa2_asset,
+            Some(b"fa2-outgoing"),
+            &outgoing_seed,
+            OutgoingNoteRole::TransferRecipient,
+        )
+        .expect("FA2 output note should build");
+        let nm = NoteMemo {
+            index: 11,
+            cm: note.cm,
+            enc: note.enc,
+        };
+
+        let recovered = outgoing_record_for_note(&outgoing_seed, &nm)
+            .expect("outgoing material must recover FA2 sender note");
+        assert_eq!(recovered.index, 11);
+        assert_eq!(recovered.cm, nm.cm);
+        assert_eq!(recovered.value, 91);
+        assert_eq!(
+            recovered.asset_id, fa2_asset,
+            "recovered outgoing record must be labelled with the FA2 asset_id, not tez",
         );
     }
 
@@ -6005,6 +6165,7 @@ mod tests {
                         cm,
                         value: *value as u64,
                         memo: vec![idx as u8],
+                        asset_id: ASSET_TEZ,
                     }
                 })
                 .collect();
