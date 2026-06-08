@@ -233,9 +233,10 @@ pub fn verify(
 
     assert(v_fee > 0_u64, 'unshield prod fee');
 
-    // Tally outputs into the per-asset accumulators. asset_pub and
-    // asset_fee are both ASSET_TEZ (asserted above). Each change slot
-    // routes to tez_out or primary_out based on its witness asset.
+    // Tally outputs into the per-asset accumulators. asset_fee is
+    // pinned to ASSET_TEZ (asserted above); the two change slots
+    // and the public exit each route based on their declared
+    // witness asset.
     let mut tez_out: u128 = v_fee.into(); // producer fee pinned to tez
     let mut primary_out: u128 = 0;
     if asset_change == ASSET_TEZ {
@@ -248,9 +249,26 @@ pub fn verify(
     } else {
         primary_out += v_change_2.into();
     }
-    // The public exit always lands in the tez accumulator (asset_pub
-    // pinned to ASSET_TEZ above).
-    tez_out += v_pub.into();
+
+    // asset_pub MUST be in the same {tez, primary} pair every other
+    // asset is constrained to. Without this, a prover could mint a
+    // non-tez asset on L1 by spending only tez inputs: the kernel
+    // reads asset_pub from the proof's public outputs and routes
+    // the outbox burn to its registered ticketer, so a v_pub credited
+    // to the wrong lane lets an attacker mint a token they never
+    // deposited. The earlier Phase E.3 lift of the tez pin on
+    // asset_pub silently broke the balance accounting because the
+    // unconditional `tez_out += v_pub` here pre-dated the per-asset
+    // constraint.
+    assert(
+        asset_pub == ASSET_TEZ || asset_pub == primary_non_tez_asset,
+        'unshield: bad asset_pub',
+    );
+    if asset_pub == ASSET_TEZ {
+        tez_out += v_pub.into();
+    } else {
+        primary_out += v_pub.into();
+    }
 
     // Per-asset balance.
     assert(tez_in == tez_out + fee.into(), 'unshield: tez balance');
@@ -1311,6 +1329,166 @@ mod tests {
     fn test_unshield_rejects_asset_pub_mutation_via_sighash_binding() {
         let mut fixture = build_fixture();
         fixture.asset_pub = 0xDEADBEEF;
+        run_verify(@fixture);
+    }
+
+    /// CRITICAL: a prover MUST NOT be able to mint a non-tez asset
+    /// on L1 by spending only tez inputs. This was a real bug in
+    /// Phase E.3: when the `asset_pub == ASSET_TEZ` pin was lifted
+    /// for the multi-bridge upgrade, the balance accounting still
+    /// added v_pub unconditionally to tez_out. So a fixture with
+    /// all-tez inputs and asset_pub = non-tez balanced fine on the
+    /// tez lane (because v_pub went there) while the primary lane
+    /// trivially balanced at 0 == 0 — letting the kernel emit an
+    /// outbox burn for v_pub units of a token the prover never
+    /// deposited.
+    ///
+    /// The fix routes v_pub through whichever accumulator its
+    /// asset_pub belongs to AND asserts asset_pub ∈ {tez, primary}.
+    /// This test constructs the original exploit (all-tez inputs,
+    /// non-tez asset_pub, primary_non_tez_asset = asset_pub) with a
+    /// fresh signature so the WOTS sighash check passes — meaning
+    /// the failure can only come from the per-asset balance
+    /// constraint we just added.
+    ///
+    /// In this fixture's specific configuration the tez side fails
+    /// first: the original two-input fixture had v_in = v_change +
+    /// v_fee + fee + v_pub (i.e. v_pub was funded by tez inputs).
+    /// Once we re-route v_pub off the tez lane, tez_in stays at 80
+    /// but tez_out drops by 47 (the v_pub amount), so the tez
+    /// balance assertion catches it before the primary lane is
+    /// even checked. Either failure proves the attack is rejected
+    /// — both are part of the same per-asset-balance invariant.
+    #[test]
+    #[should_panic(expected: ('unshield: tez balance',))]
+    fn test_unshield_rejects_non_tez_v_pub_with_only_tez_inputs() {
+        // Start from the pure-tez two-input fixture (all inputs +
+        // change + fee in tez). Repoint asset_pub at a synthetic
+        // primary asset and set primary_non_tez_asset to the same
+        // value so the in-pair check on asset_pub passes. Then
+        // re-sign so WOTS verifies. With the fix in place, the
+        // per-asset balance assertion catches the attempted mint:
+        // primary_in = 0 (no primary inputs) but primary_out =
+        // v_pub > 0 (v_pub got routed to the primary lane).
+        let primary = 0xFA2B1A5E;
+        let mut fixture = build_two_input_fixture();
+        fixture.asset_pub = primary;
+        fixture.primary_non_tez_asset = primary;
+        // v_change_2 was zero in the base fixture; everything else
+        // stays as-is so tez_in == tez_out + fee remains true on
+        // the tez lane.
+        let new_sighash = unshield_sighash(
+            fixture.auth_domain,
+            fixture.root,
+            fixture.nf_list.span(),
+            fixture.v_pub,
+            fixture.asset_pub,
+            fixture.fee,
+            fixture.recipient,
+            change_commitment_or_zero(
+                fixture.has_change,
+                fixture.d_j_change,
+                fixture.v_change,
+                fixture.asset_change,
+                fixture.rseed_change,
+                fixture.auth_root_change,
+                fixture.auth_pub_seed_change,
+                fixture.nk_tag_change,
+                fixture.memo_ct_hash_change,
+            ),
+            fixture.memo_ct_hash_change,
+            0,
+            0,
+            note_commitment(
+                fixture.d_j_fee,
+                fixture.v_fee,
+                fixture.rseed_fee,
+                fixture.auth_root_fee,
+                fixture.auth_pub_seed_fee,
+                fixture.nk_tag_fee,
+            ),
+            fixture.memo_ct_hash_fee,
+        );
+        let sig_0 = sign_unshield_input(new_sighash, 0x9102, 0_u32, 0x9200);
+        let sig_1 = sign_unshield_input(new_sighash, 0x9102, 1_u32, 0x9300);
+        let mut wots_sig_flat: Array<felt252> = array![];
+        let mut k: u32 = 0;
+        while k < sig_0.len() {
+            wots_sig_flat.append(*sig_0.at(k));
+            k += 1;
+        }
+        let mut m: u32 = 0;
+        while m < sig_1.len() {
+            wots_sig_flat.append(*sig_1.at(m));
+            m += 1;
+        }
+        fixture.wots_sig_flat = wots_sig_flat;
+        run_verify(@fixture);
+    }
+
+    /// Closely-related: if asset_pub is set to a third asset
+    /// (neither tez nor primary_non_tez_asset), the in-pair check
+    /// rejects it BEFORE the balance accountant gets a chance.
+    /// Without this layer, a prover could create a synthetic
+    /// "rogue" asset_pub that's not in the registered FA2 set at
+    /// the kernel layer; the kernel would catch it in
+    /// `ticketer_for_asset`, but having defense-in-depth at the
+    /// Cairo layer means the proof itself is rejected, never even
+    /// reaching the kernel.
+    #[test]
+    #[should_panic(expected: ('unshield: bad asset_pub',))]
+    fn test_unshield_rejects_third_asset_in_asset_pub() {
+        let primary = 0xFA2B1A5E;
+        let rogue = 0xC0FFEE;
+        let mut fixture = build_two_input_fixture();
+        fixture.primary_non_tez_asset = primary;
+        fixture.asset_pub = rogue;
+        let new_sighash = unshield_sighash(
+            fixture.auth_domain,
+            fixture.root,
+            fixture.nf_list.span(),
+            fixture.v_pub,
+            fixture.asset_pub,
+            fixture.fee,
+            fixture.recipient,
+            change_commitment_or_zero(
+                fixture.has_change,
+                fixture.d_j_change,
+                fixture.v_change,
+                fixture.asset_change,
+                fixture.rseed_change,
+                fixture.auth_root_change,
+                fixture.auth_pub_seed_change,
+                fixture.nk_tag_change,
+                fixture.memo_ct_hash_change,
+            ),
+            fixture.memo_ct_hash_change,
+            0,
+            0,
+            note_commitment(
+                fixture.d_j_fee,
+                fixture.v_fee,
+                fixture.rseed_fee,
+                fixture.auth_root_fee,
+                fixture.auth_pub_seed_fee,
+                fixture.nk_tag_fee,
+            ),
+            fixture.memo_ct_hash_fee,
+        );
+        let sig_0 = sign_unshield_input(new_sighash, 0x9102, 0_u32, 0x9200);
+        let sig_1 = sign_unshield_input(new_sighash, 0x9102, 1_u32, 0x9300);
+        let mut wots_sig_flat: Array<felt252> = array![];
+        let mut k: u32 = 0;
+        while k < sig_0.len() {
+            wots_sig_flat.append(*sig_0.at(k));
+            k += 1;
+        }
+        let mut m: u32 = 0;
+        while m < sig_1.len() {
+            wots_sig_flat.append(*sig_1.at(m));
+            m += 1;
+        }
+        fixture.wots_sig_flat = wots_sig_flat;
         run_verify(@fixture);
     }
 
