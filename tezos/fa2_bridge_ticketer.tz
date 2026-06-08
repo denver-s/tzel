@@ -8,26 +8,40 @@
 #   - fa2_contract: the L1 FA2 contract that holds the underlying token
 #   - token_id:     the specific token_id served by this ticketer
 #
+# L2 ticket content is canonical: every mint emits content `(0, None)`
+# regardless of the FA2 token_id this ticketer wraps, and burn accepts
+# only `(0, None)` content. The L2 asset_id derives from the
+# ticketer's KT1 address, which has the (fa2_contract, token_id) pair
+# in immutable storage, so the L2 layer doesn't need to repeat the
+# FA2 token_id inside the ticket. This is what makes the bridge work
+# for FA2 contracts whose token_id is non-zero — earlier drafts
+# stuffed the stored token_id into the L2 ticket content, but the
+# rollup kernel enforces `ticket.content.token_id == 0` on every
+# deposit (and on every burn outbox message it emits), so any
+# token_id != 0 was structurally unbridgeable.
+#
 # %mint flow (L1 -> L2 deposit):
 #   1. Off-chain: caller calls fa2_contract's %update_operators to
 #      authorise this ticketer to pull `token_id` tokens from them.
 #   2. Caller invokes %mint(amount, receiver, rollup).
 #   3. Contract calls fa2_contract %transfer to pull `amount` of
 #      `token_id` from SENDER into SELF_ADDRESS.
-#   4. Contract mints an L2 ticket of `amount` with content
-#      (token_id, None) and TRANSFER_TOKENS it to the rollup, paired
-#      with `receiver` (which must be a `deposit:<hex pubkey_hash>`
-#      L2 string per the kernel's parse_bridge_deposit).
+#   4. Contract mints an L2 ticket of `amount` with canonical
+#      content `(0, None)` and TRANSFER_TOKENS it to the rollup,
+#      paired with `receiver` (which must be a
+#      `deposit:<hex pubkey_hash>` L2 string per the kernel's
+#      parse_bridge_deposit).
 #
 # %burn flow (L2 -> L1 exit):
 #   1. Rollup kernel emits an outbox burn message to this ticketer,
 #      with parameter (receiver, ticket) where the ticket has the
-#      ticketer's own address as the creator.
+#      ticketer's own address as the creator and canonical content
+#      `(0, None)`.
 #   2. Contract verifies the ticket's creator == SELF_ADDRESS,
-#      content's token_id matches storage, and content's metadata is
-#      None (we don't use metadata in v2).
+#      content's token_id == 0, and content's metadata is None.
 #   3. Contract calls fa2_contract %transfer to send `amount` of
-#      `token_id` from SELF_ADDRESS to the receiver's L1 address.
+#      the stored `token_id` from SELF_ADDRESS to the receiver's L1
+#      address.
 
 parameter
   (or
@@ -143,17 +157,29 @@ code
         TRANSFER_TOKENS ;
         # stack: fa2_op:operation  token_id:nat  amount:nat  receiver:bytes  rollup:address  storage
 
-        # ----- Build the L2 ticket: content = (token_id, None),
-        # ----- amount = amount.
-        SWAP ;
-        # stack: token_id:nat  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
+        # ----- Build the canonical L2 ticket content `(0, None)`.
+        # ----- The FA2 token_id from storage is NOT carried in the
+        # ----- L2 ticket — the L2 asset_id derives structurally
+        # ----- from this contract's KT1 address (which has the
+        # ----- (fa2_contract, token_id) pair in immutable storage),
+        # ----- so the L2 layer doesn't need to repeat the FA2
+        # ----- token_id. This matches the kernel's
+        # ----- `parse_bridge_deposit` check that rejects any L2
+        # ----- ticket whose content.token_id != 0, and lets the
+        # ----- bridge serve FA2 contracts with any token_id (not
+        # ----- just 0).
+        DIP { DROP } ;
+        # stack: fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
+
+        PUSH nat 0 ;
+        # stack: 0:nat  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
 
         NONE bytes ;
-        # stack: meta:option(bytes)=None  token_id:nat  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
+        # stack: meta:option(bytes)=None  0:nat  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
 
         SWAP ;
         PAIR ;
-        # stack: content:(nat token_id, option bytes None)  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
+        # stack: content:(nat 0, option bytes None)  fa2_op:operation  amount:nat  receiver:bytes  rollup:address  storage
 
         DIG 2 ;
         # stack: amount:nat  content:(nat, option bytes)  fa2_op:operation  receiver:bytes  rollup:address  storage
@@ -273,23 +299,28 @@ code
           { PUSH string "fa2_bridge: ticket metadata must be None" ; FAILWITH } ;
         # stack: content:(nat token_id, option bytes)  amount:nat  ticket  receiver  storage
 
-        # ----- Verify ticket content's token_id matches storage.
+        # ----- Verify ticket content's token_id is 0. The L2 ticket
+        # ----- content is canonical `(0, None)` (see header). The
+        # ----- FA2 token_id binding is provided by this contract's
+        # ----- immutable storage and the asset_id derived from its
+        # ----- KT1, not by the ticket content. The creator check
+        # ----- above already pins the ticket to this ticketer's
+        # ----- KT1, so the token_id == 0 check is a defense-in-
+        # ----- depth guard against the kernel emitting any other
+        # ----- content shape in a future protocol version.
         CAR ;
         # stack: ticket_token_id:nat  amount:nat  ticket  receiver  storage
 
-        DUP 5 ;
-        # stack: storage'  ticket_token_id:nat  amount:nat  ticket  receiver  storage
-
-        CDR ;
-        # stack: storage_token_id:nat  ticket_token_id:nat  amount:nat  ticket  receiver  storage
+        PUSH nat 0 ;
+        # stack: 0:nat  ticket_token_id:nat  amount:nat  ticket  receiver  storage
 
         COMPARE ;
-        # stack: cmp:int(stored - ticket)  amount:nat  ticket  receiver  storage
+        # stack: cmp:int  amount:nat  ticket  receiver  storage
 
         EQ ;
         # stack: ok:bool  amount:nat  ticket  receiver  storage
 
-        IF {} { PUSH string "fa2_bridge: ticket token_id mismatch" ; FAILWITH } ;
+        IF {} { PUSH string "fa2_bridge: ticket token_id must be 0" ; FAILWITH } ;
         # stack: amount:nat  ticket  receiver  storage
 
         # ----- Discard the consumed ticket — we've validated every

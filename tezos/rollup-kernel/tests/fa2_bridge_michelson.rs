@@ -184,8 +184,9 @@ fn burn_branch_validates_creator_token_id_and_metadata() {
     // FA2 tokens out:
     //   1. ticketer creator == SELF_ADDRESS (only this contract's
     //      tickets can be burned here)
-    //   2. ticket content's token_id == storage's token_id (one-
-    //      ticketer-per-asset invariant)
+    //   2. ticket content's token_id == 0 (the L2 ticket content is
+    //      canonical `(0, None)`; the FA2 token_id binding lives in
+    //      the ticketer's immutable storage, not in the L2 ticket)
     //   3. ticket content's metadata == None (we don't use metadata
     //      in v2; reject anything carrying a value to keep the
     //      attack surface minimal)
@@ -198,7 +199,7 @@ fn burn_branch_validates_creator_token_id_and_metadata() {
     // and this test catches it.
     for msg in [
         "fa2_bridge: unexpected ticket creator",
-        "fa2_bridge: ticket token_id mismatch",
+        "fa2_bridge: ticket token_id must be 0",
         "fa2_bridge: ticket metadata must be None",
     ] {
         assert!(
@@ -309,7 +310,7 @@ fn every_failwith_message_is_unique_and_prefixed() {
         "fa2_bridge: invalid rollup contract",
         "fa2_bridge: unexpected ticket creator",
         "fa2_bridge: ticket metadata must be None",
-        "fa2_bridge: ticket token_id mismatch",
+        "fa2_bridge: ticket token_id must be 0",
     ];
     for required in required_messages {
         assert!(
@@ -396,14 +397,74 @@ fn no_amount_handling_on_mint() {
 
 #[test]
 fn ticket_content_metadata_is_always_none() {
-    // Mint must construct the L2 ticket with content (token_id, None);
-    // burn must reject any ticket whose metadata is not None. The
-    // metadata field is reserved for future use; in v2 the kernel
-    // doesn't carry anything in it.
+    // Mint must construct the L2 ticket with canonical content
+    // `(0, None)`; burn must reject any ticket whose metadata is not
+    // None. The metadata field is reserved for future use; in v2 the
+    // kernel doesn't carry anything in it.
     let instr = instructions_only(&contract_source());
     assert!(
         instr.contains("NONE bytes"),
         "mint must PUSH None for the ticket metadata; metadata is reserved-future-use in v2",
+    );
+}
+
+/// Regression for the FA2-bridge non-zero-token_id production
+/// blocker. The L2 ticket content MUST be canonical `(0, None)`
+/// regardless of the FA2 token_id this ticketer wraps. The kernel's
+/// `parse_bridge_deposit` rejects any deposit ticket whose
+/// `content.token_id != 0`, and the kernel's outbox burn encoder
+/// always emits content `(0, None)`. If the Michelson contract were
+/// to stuff `storage.token_id` into the L2 ticket content (an
+/// earlier draft did), the bridge would be structurally broken for
+/// any FA2 with token_id != 0 — deposits would be rejected by the
+/// kernel and burns would fail the ticketer's content check, with
+/// user funds permanently stuck.
+#[test]
+fn mint_emits_canonical_zero_token_id_ticket_content() {
+    let src = contract_source();
+    let instr = instructions_only(&src);
+
+    // The contract MUST NOT reach for storage.token_id as the L2
+    // ticket content. We can't structurally prove "this DUP isn't
+    // for the ticket content" from grep alone, but we can lock in
+    // two positive signals that together pin the canonical-content
+    // design:
+    //
+    //   (a) The mint branch contains `PUSH nat 0` — used to seed
+    //       the L2 ticket's content.token_id field. No other use
+    //       of `PUSH nat 0` exists in the mint branch in the
+    //       canonical-content design; if a future refactor brings
+    //       back a `storage.token_id`-based content, this PUSH
+    //       would have to disappear.
+    //
+    //   (b) The burn branch FAILWITH uses the explicit "must be 0"
+    //       message rather than "mismatch", which is the signal
+    //       that the burn check compares against the literal 0
+    //       (not against storage).
+    assert!(
+        instr.contains("PUSH nat 0"),
+        "mint must PUSH nat 0 to seed the L2 ticket's canonical content.token_id; \
+         without this the ticket content carries storage.token_id and the bridge \
+         is broken for any FA2 with token_id != 0 (kernel rejects \
+         content.token_id != 0)",
+    );
+    assert!(
+        src.contains("\"fa2_bridge: ticket token_id must be 0\""),
+        "burn must FAILWITH \"fa2_bridge: ticket token_id must be 0\" — verifies \
+         the burn check compares against literal 0 rather than storage.token_id, \
+         matching the canonical-content design",
+    );
+
+    // Defense in depth: make sure the OLD failure mode's string is
+    // gone. If a refactor reintroduces `storage.token_id == ticket
+    // content.token_id`, the old "mismatch" wording would
+    // reappear and this assertion would fail.
+    assert!(
+        !src.contains("fa2_bridge: ticket token_id mismatch"),
+        "burn branch still references the old `storage.token_id == content.token_id` \
+         check — that path is broken for any FA2 with token_id != 0 because the \
+         kernel emits burn outbox tickets with canonical content (0, None) \
+         regardless of which FA2 ticketer they target",
     );
 }
 
@@ -493,8 +554,20 @@ fn fa2_bridge_originates_under_octez_client_mockup() {
     // its declared type and runs the empty trace. Real FA2 calls
     // happen at mint/burn time, which we don't simulate here
     // (would require interpreted ticket state).
+    //
+    // Note: we deliberately pick a NON-ZERO token_id here. An
+    // earlier draft of the contract stuffed `storage.token_id` into
+    // the L2 ticket content; with this value, deposits would be
+    // rejected by the rollup kernel and burns would fail the
+    // ticketer's content check — making the bridge structurally
+    // unusable. The canonical-content design (L2 content = `(0,
+    // None)` regardless of storage) is what lets `token_id != 0`
+    // pass through. The complementary structural test
+    // `mint_emits_canonical_zero_token_id_ticket_content` pins the
+    // canonical-content invariant directly; this end-to-end test
+    // verifies the contract still ORIGINATES with such storage.
     let fa2_contract = "KT1HbQepzV1nVGg8QVznG7z4RcHseD5kwqBn";
-    let token_id = "0";
+    let token_id = "42";
     let init_storage = format!("(Pair \"{}\" {})", fa2_contract, token_id);
 
     let result = Command::new(bin)
