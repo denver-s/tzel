@@ -90,9 +90,26 @@ impl AssetEntry {
 /// `BridgeConfig`. Compose the full registry at runtime with
 /// `compose_asset_registry(tez_ticketer)`.
 ///
-/// In v2 the list is empty; an FA2 bridge ticketer entry will land
-/// alongside the corresponding Michelson contract in E.5.
-pub const COMPILE_TIME_FA2_BRIDGES: &[&str] = &[];
+/// Currently-registered FA2 bridges:
+///
+/// - `KT1Um36QJyoMhLNWRohmZAszpaLhQKZRSuo7` (shadownet) — demo FA2
+///   ticketer originated 2026-06-08 by `tz1hfLgWHKNtJE5HhizdY2LvqnQJGd5oQ82K`
+///   with storage `(Pair "KT1HbQepzV1nVGg8QVznG7z4RcHseD5kwqBn" 0)`.
+///   The underlying FA2 contract address in the storage is a
+///   placeholder; for any real bridge deployment, originate a fresh
+///   ticketer pointing at the production FA2 contract and add its
+///   KT1 here. Derived asset_id:
+///   `b7d8096d79337ace4125ac100f3b2270d9ba5c2ac2300b2916c970ade16b9105`.
+///
+///   This entry is "live" on shadownet only — mainnet builds should
+///   remove it via a kernel upgrade once a production FA2 ticketer
+///   replaces it. We keep the demo entry pinned in the source so
+///   shadownet's wallet/kernel-test workflows have a real KT1 to
+///   target through `gh.gitlab.com/tezos/tezos`-grade origination,
+///   not just a synthetic test override.
+pub const COMPILE_TIME_FA2_BRIDGES: &[&str] = &[
+    "KT1Um36QJyoMhLNWRohmZAszpaLhQKZRSuo7",
+];
 
 /// Build the full asset registry for the running kernel: tez entry
 /// first (using the durable BridgeConfig's ticketer), followed by the
