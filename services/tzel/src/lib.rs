@@ -1549,6 +1549,7 @@ mod tests {
             cm: random_felt(),
             index: 7,
             addr_index: 3,
+            asset_id: ASSET_TEZ,
         };
         let json = serde_json::to_string(&note).unwrap();
         let back: Note = serde_json::from_str(&json).unwrap();

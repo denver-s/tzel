@@ -1631,6 +1631,10 @@ pub struct Note {
     pub cm: F,
     pub index: usize,
     pub addr_index: u32, // which address j this note belongs to
+    /// Asset class this note carries. Defaults to ASSET_TEZ so pre-
+    /// multiasset wallet fixtures continue to parse.
+    #[serde(with = "hex_f", default)]
+    pub asset_id: F,
 }
 
 // ═══════════════════════════════════════════════════════════════════════

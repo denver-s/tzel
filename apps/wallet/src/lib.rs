@@ -765,9 +765,22 @@ impl WalletFile {
         let nk_tg = derive_nk_tag(&nk_sp);
         let otag = owner_tag(&addr.auth_root, &addr.auth_pub_seed, &nk_tg);
         let rcm = derive_rcm(&rseed);
-        if commit(&addr.d_j, v, &ASSET_TEZ, &rcm, &otag) != cm {
-            return None;
+        // Multiasset: the encrypted note payload doesn't include the
+        // asset_id (that would force a wire-format bump and a Cairo
+        // change that re-bound mh to asset). Instead we re-derive cm
+        // against each registered asset and pick whichever matches.
+        // The cost is O(|registry|) hashes per candidate decrypt;
+        // for a single-digit registry this is negligible. The list
+        // tried is: ASSET_TEZ first (almost every note is tez), then
+        // each compile-time FA2 entry in declaration order.
+        let mut candidates: Vec<F> = Vec::with_capacity(1 + COMPILE_TIME_FA2_BRIDGES.len());
+        candidates.push(ASSET_TEZ);
+        for ticketer in COMPILE_TIME_FA2_BRIDGES {
+            candidates.push(derive_asset_id(ticketer));
         }
+        let asset_id = candidates
+            .into_iter()
+            .find(|asset| commit(&addr.d_j, v, asset, &rcm, &otag) == cm)?;
         Some(Note {
             nk_spend: nk_sp,
             nk_tag: nk_tg,
@@ -778,6 +791,7 @@ impl WalletFile {
             cm,
             index,
             addr_index: addr.index,
+            asset_id,
         })
     }
 
@@ -869,6 +883,47 @@ impl WalletFile {
             .filter(|note| pending.contains(&note_nullifier(note)))
             .map(|note| note.v as u128)
             .sum()
+    }
+
+    /// Per-asset breakdown of `balance()`. Keys are asset_ids
+    /// (ASSET_TEZ + each FA2 the wallet has ever received). Sorted
+    /// with ASSET_TEZ first, then by asset_id for stable display.
+    fn balance_by_asset(&self) -> Vec<(F, u128)> {
+        use std::collections::BTreeMap;
+        let mut acc: BTreeMap<[u8; 32], u128> = BTreeMap::new();
+        for n in &self.notes {
+            *acc.entry(n.asset_id).or_insert(0) += n.v as u128;
+        }
+        let mut out: Vec<(F, u128)> = acc.into_iter().collect();
+        // Tez first.
+        out.sort_by(|a, b| match (a.0 == ASSET_TEZ, b.0 == ASSET_TEZ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        });
+        out
+    }
+
+    /// Per-asset breakdown of `available_balance()` (excludes notes
+    /// whose nullifier sits in a pending spend).
+    fn available_balance_by_asset(&self) -> Vec<(F, u128)> {
+        use std::collections::BTreeMap;
+        let pending = self.pending_nullifier_set();
+        let mut acc: BTreeMap<[u8; 32], u128> = BTreeMap::new();
+        for n in self
+            .notes
+            .iter()
+            .filter(|n| !pending.contains(&note_nullifier(n)))
+        {
+            *acc.entry(n.asset_id).or_insert(0) += n.v as u128;
+        }
+        let mut out: Vec<(F, u128)> = acc.into_iter().collect();
+        out.sort_by(|a, b| match (a.0 == ASSET_TEZ, b.0 == ASSET_TEZ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        });
+        out
     }
 
     fn register_pending_spend(
@@ -5227,6 +5282,7 @@ mod tests {
             cm,
             index: 0,
             addr_index: 0,
+            asset_id: ASSET_TEZ,
         });
         (w, cm)
     }
@@ -5268,6 +5324,7 @@ mod tests {
             cm,
             index,
             addr_index: j,
+            asset_id: ASSET_TEZ,
         }
     }
 
@@ -5294,6 +5351,7 @@ mod tests {
                 cm: u64_to_felt(i as u64 + 1),
                 index: i,
                 addr_index: 0,
+                asset_id: ASSET_TEZ,
             }).collect();
 
             let selected = w.select_notes(amount).expect("selection should succeed");
@@ -6544,6 +6602,7 @@ mod tests {
                 cm: felt_tag(b"note-0"),
                 index: 0,
                 addr_index: 0,
+                asset_id: ASSET_TEZ,
             },
             Note {
                 nk_spend: ZERO,
@@ -6555,6 +6614,7 @@ mod tests {
                 cm: felt_tag(b"note-1"),
                 index: 1,
                 addr_index: 0,
+                asset_id: ASSET_TEZ,
             },
         ];
 
@@ -6576,6 +6636,7 @@ mod tests {
                 cm: felt_tag(b"small-note"),
                 index: 0,
                 addr_index: 0,
+                asset_id: ASSET_TEZ,
             },
             Note {
                 nk_spend: ZERO,
@@ -6587,6 +6648,7 @@ mod tests {
                 cm: felt_tag(b"large-note"),
                 index: 1,
                 addr_index: 0,
+                asset_id: ASSET_TEZ,
             },
         ];
 
@@ -7407,18 +7469,60 @@ mod tests {
 fn cmd_balance(path: &str) -> Result<(), String> {
     let w = load_wallet(path)?;
     let pending = w.pending_nullifier_set();
-    println!("Private balance: {}", w.balance());
+
+    // Per-asset breakdown. Tez first, then any FA2 assets in the
+    // wallet's note set. The single-line "Private balance: <n>"
+    // summary is kept for backward-compat with consumers (scripts,
+    // downstream wallets) that grep for it — it remains the tez
+    // total when the wallet only holds tez.
+    let totals = w.balance_by_asset();
+    let available = w.available_balance_by_asset();
+    let avail_map: std::collections::HashMap<F, u128> = available.iter().cloned().collect();
+
+    let tez_total = totals
+        .iter()
+        .find(|(asset, _)| *asset == ASSET_TEZ)
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
+    let tez_available = avail_map.get(&ASSET_TEZ).copied().unwrap_or(0);
+
+    println!("Private balance: {}", tez_total);
     if !w.pending_spends.is_empty() {
-        println!("Private available: {}", w.available_balance());
+        println!("Private available: {}", tez_available);
         println!("Pending outgoing: {}", w.pending_outgoing_balance());
         println!("Pending operations: {}", w.pending_spends.len());
     }
+
+    let has_fa2 = totals.iter().any(|(asset, _)| *asset != ASSET_TEZ);
+    if has_fa2 {
+        println!("Per-asset balance:");
+        for (asset, total) in &totals {
+            let avail = avail_map.get(asset).copied().unwrap_or(0);
+            let label = if *asset == ASSET_TEZ {
+                "tez".to_string()
+            } else {
+                hex::encode(asset)
+            };
+            if !w.pending_spends.is_empty() && avail != *total {
+                println!("  {}: {} (available: {})", label, total, avail);
+            } else {
+                println!("  {}: {}", label, total);
+            }
+        }
+    }
+
     println!("Notes: {}", w.notes.len());
     for (i, n) in w.notes.iter().enumerate() {
+        let asset_tag = if n.asset_id == ASSET_TEZ {
+            "tez".to_string()
+        } else {
+            format!("asset {}", short(&n.asset_id))
+        };
         println!(
-            "  [{}] v={} cm={} index={}{}",
+            "  [{}] v={} {} cm={} index={}{}",
             i,
             n.v,
+            asset_tag,
             short(&n.cm),
             n.index,
             if pending.contains(&note_nullifier(n)) {
@@ -9850,6 +9954,7 @@ mod network_profile_tests {
             cm,
             index: 0,
             addr_index: 0,
+            asset_id: ASSET_TEZ,
         });
         save_wallet(wallet_path_str, &wallet).expect("save wallet");
 
@@ -11339,6 +11444,7 @@ mod network_profile_tests {
                 cm,
                 index: w.notes.len(),
                 addr_index,
+                asset_id: ASSET_TEZ,
             });
         };
         push_note(&mut w, &acc, 0, 100);
