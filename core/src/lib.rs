@@ -7058,21 +7058,30 @@ mod tests {
         }
 
         /// compose_asset_registry_with always produces:
-        ///   - length = 1 + |fa2|
-        ///   - tez entry at index 0
-        ///   - subsequent entries in the order given
-        ///   - tez always has asset_id = ASSET_TEZ
-        ///   - FA2 entries match derive_asset_id of their ticketer
+        ///   - tez entry at index 0 with asset_id = ASSET_TEZ
+        ///   - subsequent entries are the FA2 list with duplicates of
+        ///     the tez ticketer SKIPPED (defensive guard from
+        ///     compose_asset_registry_with — see X4 fix)
+        ///   - tez ticketer string preserved on entry 0
+        ///   - non-skipped FA2 entries appear in order with the
+        ///     correct derived asset_id
         #[test]
         fn prop_compose_asset_registry_shape(
             tez in arb_ticketer(),
             fa2 in prop::collection::vec(arb_ticketer(), 0..5),
         ) {
             let registry = compose_asset_registry_with(&tez, &fa2);
-            prop_assert_eq!(registry.len(), 1 + fa2.len());
+
+            // Length = 1 (tez) + number of FA2 entries that are NOT
+            // equal to the tez ticketer (the X4 defense skips
+            // duplicates rather than letting first-match ordering
+            // mask the FA2 entry).
+            let expected_kept: Vec<&String> =
+                fa2.iter().filter(|f| f.as_str() != tez.as_str()).collect();
+            prop_assert_eq!(registry.len(), 1 + expected_kept.len());
             prop_assert_eq!(registry[0].asset_id, ASSET_TEZ);
             prop_assert_eq!(registry[0].ticketer.as_str(), tez.as_str());
-            for (i, fa2_addr) in fa2.iter().enumerate() {
+            for (i, fa2_addr) in expected_kept.iter().enumerate() {
                 prop_assert_eq!(registry[i + 1].ticketer.as_str(), fa2_addr.as_str());
                 prop_assert_eq!(registry[i + 1].asset_id, derive_asset_id(fa2_addr));
             }

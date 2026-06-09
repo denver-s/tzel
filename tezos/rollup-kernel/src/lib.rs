@@ -4804,6 +4804,18 @@ mod tests {
             post_shield.is_empty(),
             "FA2 pool must be drained to empty after the shield",
         );
+        // Phase E.5 (bug #2 regression): the tez pool MUST also be
+        // drained by `producer_fee` after the FA2 shield. The kernel
+        // debits the tez pool independently of the FA2 pool because
+        // the producer-fee output note is permanently tez. Without
+        // this assertion a future refactor that silently dropped
+        // apply_durable_shield_commit's second `write_store` would
+        // still pass this test.
+        let post_shield_tez = host.read_store(&tez_pool_path, 8).unwrap_or_default();
+        assert!(
+            post_shield_tez.is_empty(),
+            "tez pool (which funded producer_fee) must be drained to empty after the FA2 shield",
+        );
 
         // ─── 3. FA2 shield against the tez pool would have been
         // rejected (pool doesn't exist); separately, a shield

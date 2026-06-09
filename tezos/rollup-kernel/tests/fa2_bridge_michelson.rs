@@ -439,31 +439,34 @@ fn ticket_content_metadata_is_always_none() {
 #[test]
 fn mint_emits_canonical_zero_token_id_ticket_content() {
     let src = contract_source();
-    let instr = instructions_only(&src);
 
-    // The contract MUST NOT reach for storage.token_id as the L2
-    // ticket content. We can't structurally prove "this DUP isn't
-    // for the ticket content" from grep alone, but we can lock in
-    // two positive signals that together pin the canonical-content
-    // design:
-    //
-    //   (a) The mint branch contains `PUSH nat 0` — used to seed
-    //       the L2 ticket's content.token_id field. No other use
-    //       of `PUSH nat 0` exists in the mint branch in the
-    //       canonical-content design; if a future refactor brings
-    //       back a `storage.token_id`-based content, this PUSH
-    //       would have to disappear.
-    //
-    //   (b) The burn branch FAILWITH uses the explicit "must be 0"
-    //       message rather than "mismatch", which is the signal
-    //       that the burn check compares against the literal 0
-    //       (not against storage).
+    // Slice the contract source into the mint and burn branches via
+    // the `# === MINT BRANCH ===` / `# === BURN BRANCH ===` banners
+    // the contract uses. The PUSH-nat-0 assertion must target the
+    // MINT branch specifically: scoping it to `instructions_only(&src)`
+    // (as an earlier draft did) was satisfied trivially by the burn
+    // branch's `PUSH nat 0` zero-check on the ticket content, even
+    // if a future refactor reintroduced storage.token_id-based mint
+    // content.
+    let mint_marker = "MINT BRANCH";
+    let burn_marker = "BURN BRANCH";
+    let mint_start = src
+        .find(mint_marker)
+        .expect("contract must label its mint branch");
+    let burn_start = src
+        .find(burn_marker)
+        .expect("contract must label its burn branch");
+    assert!(mint_start < burn_start, "mint branch must precede burn branch");
+    let mint_branch = &src[mint_start..burn_start];
+    let mint_instr = instructions_only(mint_branch);
+
     assert!(
-        instr.contains("PUSH nat 0"),
-        "mint must PUSH nat 0 to seed the L2 ticket's canonical content.token_id; \
+        mint_instr.contains("PUSH nat 0"),
+        "MINT branch must PUSH nat 0 to seed the L2 ticket's canonical content.token_id; \
          without this the ticket content carries storage.token_id and the bridge \
          is broken for any FA2 with token_id != 0 (kernel rejects \
-         content.token_id != 0)",
+         content.token_id != 0). Mint branch instructions: {}",
+        mint_instr,
     );
     assert!(
         src.contains("\"fa2_bridge: ticket token_id must be 0\""),
