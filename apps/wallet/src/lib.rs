@@ -10144,7 +10144,7 @@ fn cmd_transfer_rollup(
     let cm_1_hex = hex::encode(&note_1.cm);
     let cm_2_hex = hex::encode(&note_2.cm);
     // producer_cm reports note_4 (the producer-fee note), not note_3
-    // (the zero-value tez change_2 placeholder).
+    // (the change_2 tez-refund note).
     let cm_4_hex = hex::encode(&note_4.cm);
     // `change` historically reported the tez refund. With multi-
     // asset transfers we have two refunds (primary and tez); preserve
